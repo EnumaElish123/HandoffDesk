@@ -1,0 +1,54 @@
+name: Tests and source checks
+
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.10', '3.12']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Check public source tree
+        run: python scripts/check_public_tree.py
+      - name: Test server commands without Tk
+        run: python tests/run_tests.py --headless
+      - name: Prepare Linux desktop test environment
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y xvfb python3-tk
+      - name: Test Linux desktop
+        if: runner.os == 'Linux'
+        run: |
+          xvfb-run -a python -c "import tkinter; r=tkinter.Tk(); r.withdraw(); r.update(); print('Tk display available'); r.destroy()"
+          xvfb-run -a python tests/run_tests.py
+      - name: Test Windows desktop
+        if: runner.os == 'Windows'
+        run: |
+          python -c "import tkinter; r=tkinter.Tk(); r.withdraw(); r.update(); print('Tk display available'); r.destroy()"
+          python tests/run_tests.py
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: '3.12'
+      - run: python -m pip install build
+      - run: python -m build
+      - run: python -m pip install --no-deps dist/*.whl
+      - name: Test installed package outside checkout
+        working-directory: ${{ runner.temp }}
+        run: python "$GITHUB_WORKSPACE/scripts/smoke_install.py"

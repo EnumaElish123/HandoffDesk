@@ -1,0 +1,32 @@
+name: Bug report
+description: Report a reproducible problem in HandoffDesk
+body:
+  - type: markdown
+    attributes:
+      value: Please use a small fictional project. Do not attach your database, local project configuration, credentials, or unredacted paths and screenshots.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Output of handoffdesk --version and the commit if running from source.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, Python version, and desktop or headless server.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Include minimal commands or actions, expected behavior, and actual behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized error or screenshot
+      description: Remove personal paths, project contents, and session identifiers before sharing.

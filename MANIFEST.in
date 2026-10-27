@@ -1,0 +1,9 @@
+include LICENSE THIRD_PARTY_NOTICES.md README.md README.zh-CN.md CHANGELOG.md CONTRIBUTING.md SECURITY.md
+include handoffdesk.cmd handoffdesk.sh Start.cmd Start.sh
+recursive-include docs *.md *.png
+recursive-include config *.example.json
+recursive-include examples *.json
+include scripts/*.py
+include tests/run_tests.py tests/test_*.py
+recursive-include handoffdesk/assets *.png *.svg *.ico
+global-exclude __pycache__ *.py[cod] *.sqlite3 *.sqlite3-* *.db *.log

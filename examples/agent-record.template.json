@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "project": "alpha",
+  "workline": "default",
+  "operation_id": "REPLACE_WITH_UNIQUE_LOGICAL_SUBMISSION_ID",
+  "expected_revision": 0,
+  "record": {
+    "title": "REPLACE_WITH_STAGE_TITLE",
+    "event_kind": "handoff",
+    "last_done": "REPLACE_WITH_ACTUAL_PROGRESS_AND_LIMITS",
+    "next_action": "REPLACE_WITH_CONCRETE_NEXT_ACTION",
+    "blockers": []
+  },
+  "actor": {
+    "name": "Codex"
+  },
+  "verification": {
+    "status": "not_run",
+    "summary": "REPLACE_WITH_ACTUAL_CHECKS_AND_UNVERIFIED_SCOPE"
+  },
+  "files": [
+    {
+      "path": "/absolute/path/to/your-project/report.md",
+      "purpose": "REPLACE_WITH_WHY_THIS_FILE_IS_NEEDED",
+      "role": "report"
+    }
+  ],
+  "source_snapshot_id": null
+}

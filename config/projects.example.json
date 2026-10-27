@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "projects": [
+    {
+      "id": "alpha",
+      "name": "My project",
+      "aliases": ["sample"],
+      "roots": {
+        "main": "/absolute/path/to/your-project"
+      },
+      "adapters": ["registered_files", "json_fields", "git_readonly"],
+      "sources": [
+        {
+          "id": "plan",
+          "root": "main",
+          "path": "docs/plan.md",
+          "format": "markdown",
+          "purpose": "current_plan"
+        },
+        {
+          "id": "state",
+          "root": "main",
+          "path": "state.json",
+          "format": "json",
+          "fields": {
+            "status": "/status"
+          }
+        }
+      ],
+      "entries": [
+        {
+          "id": "plan-file",
+          "type": "open_source",
+          "source_id": "plan",
+          "label": "Project plan"
+        },
+        {
+          "id": "documents",
+          "type": "open_folder",
+          "root": "main",
+          "path": "docs",
+          "label": "Documents"
+        }
+      ],
+      "worklines": [
+        {
+          "id": "implementation",
+          "name": "Implementation",
+          "entry_ids": ["plan-file"]
+        }
+      ]
+    }
+  ]
+}

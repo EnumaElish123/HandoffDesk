@@ -1,0 +1,15 @@
+name: Feature request
+description: Describe a workflow that HandoffDesk could make easier
+body:
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Your workflow and the problem
+      description: Describe the task, who records the information, and who reads it.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Suggested behavior
+      description: A concrete example is helpful. Use fictional project names and paths.
