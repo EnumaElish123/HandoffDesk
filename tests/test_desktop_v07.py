@@ -256,6 +256,45 @@ class DesktopV07Journeys(unittest.TestCase):
         self.assertAlmostEqual(tree.yview()[0], old_y, delta=.01)
         self.assertAlmostEqual(tree.xview()[0], old_x, delta=.01)
 
+    def test_relocation_keeps_new_row_visible_when_details_resize_the_table(self):
+        paths = []
+        for index in range(24):
+            path = self.long_folder / f'布局变化时的原始材料_{index:02}.txt'
+            path.write_text(f'原始材料 {index}', encoding='utf-8')
+            paths.append(path)
+        missing = self.attachments[0]
+        self.source_baseline = self.source_state()
+        self.new_node('文件详情变高后仍能看到新位置')
+        self.attach(paths + [missing])
+        missing.unlink()
+        self.source_baseline.pop(str(missing))
+        self.panel.refresh_button.invoke()
+        self.panel.search_var.set(missing.name)
+        self.root.update()
+        self.select_file(missing)
+        original_details = self.panel._file_selected
+        resized = []
+        def larger_details(event=None):
+            original_details(event)
+            if not resized:
+                # Model a font/desktop-metric change while the new selection's
+                # details are rendered, after an early Treeview.see would run.
+                self.panel.path_text.configure(font=('TkDefaultFont', 20))
+                resized.append(True)
+        replacement = self.attachments[1]
+        with patch('handoffdesk.file_panel.filedialog.askopenfilename', return_value=str(replacement)), \
+                patch.object(self.panel, '_file_selected', side_effect=larger_details):
+            self.more('重新定位')
+        self.root.update()
+        changed = next(row for row in self.panel.last_result['files'] if row['path'] == str(replacement))
+        tree = self.panel.files_tree
+        self.assertTrue(resized)
+        self.assertEqual(tree.selection(), (changed['id'],))
+        bounds = tree.bbox(changed['id'])
+        self.assertTrue(bounds, 'The relocated row must remain visible after details change the viewport')
+        self.assertGreaterEqual(bounds[1], 0)
+        self.assertLessEqual(bounds[1] + bounds[3], tree.winfo_height())
+
     def test_read_failure_retains_context_disables_changes_and_retry_recovers(self):
         node = self.new_node('需要保留浏览上下文的阶段')
         self.attach(self.attachments)

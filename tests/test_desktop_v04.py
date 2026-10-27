@@ -176,6 +176,33 @@ class DesktopV04Tests(unittest.TestCase):
         self.app.source_action('copy')
         self.assertEqual(self.root.clipboard_get(), str(self.source))
 
+    def test_compact_source_list_reveals_selected_row_after_details_and_keeps_manual_scroll(self):
+        self.app.notebook.select(self.app.source_tab)
+        self.root.update()
+        # A viewport between one and two full rows exposes Tk 8.6's stale
+        # see() geometry when selecting a source also updates its details.
+        tree = self.app.source_tree
+        for minimum in (0, 99):
+            self.app.source_tab.rowconfigure(1, weight=0, minsize=minimum)
+            self.root.update()
+            tree.yview_moveto(0)
+            tree.selection_set('23')
+            tree.see('23')
+            self.app._show_source()
+            self.root.update()
+            row = tree.bbox('23')
+            self.assertTrue(row, 'The selected source must remain reachable')
+            self.assertLessEqual(row[1] + row[3], tree.winfo_height(),
+                                 'The final selected source must be fully visible')
+        self.assertIn(self.filename, self.app.source_detail.get('1.0', 'end'))
+        # Browsing earlier rows after that selection must not be pulled back
+        # by later idle redraws or an ordinary window resize.
+        tree.yview_moveto(0)
+        self.root.update()
+        self.root.geometry('850x630')
+        self.root.update()
+        self.assertEqual(tree.yview()[0], 0.0)
+
     def test_long_editor_content_scrolls_and_keyboard_save_keeps_record_semantics(self):
         for kind in ('plan', 'handoff'):
             with self.subTest(kind=kind):

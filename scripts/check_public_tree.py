@@ -23,6 +23,7 @@ def check(paths):
             failures.append(f'{name}: missing or not a regular file')
             continue
         if (set(relative.parts) & FORBIDDEN_PARTS or name in FORBIDDEN_FILES
+                or relative.name in {'projects.json', 'roots.local.json'}
                 or re.search(r'\.(?:sqlite3?|db)(?:-[\w-]+)?$', name, flags=re.IGNORECASE)
                 or path.suffix.lower() in {'.log', '.pem', '.key', '.pyc', '.bak', '.zip', '.gz', '.whl', '.7z', '.exe', '.dll', '.so'}
                 or any(part == '.env' or part.startswith('.env.') for part in relative.parts)):

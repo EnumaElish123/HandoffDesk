@@ -863,6 +863,7 @@ class App:
         self.source_tree.grid(row=1, column=0, sticky="nsew", pady=(6, 4))
         self._scroll(frame, self.source_tree, 1)
         self.source_tree.bind("<<TreeviewSelect>>", self._show_source)
+        self.source_tree.bind("<Destroy>", self._cancel_source_reveal, add="+")
         self.source_detail = _text(frame, height=2, width=30)
         self.source_detail.grid(row=2, column=0, sticky="nsew")
         self.source_detail_scroll = self._scroll(frame, self.source_detail, 2)
@@ -1209,6 +1210,39 @@ class App:
             observation = self.observations[int(selected[0])]
             _set_text(self.source_detail, observation_text(observation))
             _set_text(self.source_raw, json.dumps(observation, ensure_ascii=False, indent=2))
+            # Detail text and its scrollbar can resize the source list.  Tk 8.6
+            # otherwise computes see() from its previous viewport and leaves
+            # the newly selected final row partly outside the visible area.
+            self.source_tree.update_idletasks()
+            self.source_tree.see(selected[0])
+            self._queue_source_reveal(selected[0])
+
+    def _cancel_source_reveal(self, _event=None):
+        pending = getattr(self, '_source_reveal_after', None)
+        self._source_reveal_after = None
+        if pending is not None:
+            try:
+                self.source_tree.after_cancel(pending)
+            except tk.TclError:
+                pass
+
+    def _queue_source_reveal(self, item):
+        self._cancel_source_reveal()
+        scope = self.project_id, self.workline_id
+
+        def reveal():
+            self._source_reveal_after = None
+            try:
+                if (self.closed or scope != (self.project_id, self.workline_id)
+                        or self.source_tree.selection() != (item,)):
+                    return
+                self.source_tree.see(item)
+            except tk.TclError:
+                pass  # The window may have closed before its idle callback.
+
+        # Only an explicit selection requests this follow-up.  Normal redraws
+        # and refreshes keep the user's chosen scroll position.
+        self._source_reveal_after = self.source_tree.after_idle(reveal)
 
     def _toggle_raw(self):
         raw = self.raw_visible.get()

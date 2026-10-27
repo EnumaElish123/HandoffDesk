@@ -1,7 +1,7 @@
 # Local state and project paths must never be committed.
 /data/
-/config/projects.json
-/config/roots.local.json
+projects.json
+roots.local.json
 /config/.*.tmp
 /backups/
 /exports/

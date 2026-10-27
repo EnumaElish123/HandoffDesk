@@ -29,6 +29,7 @@ class NodeFilesPanel:
         self._updating = False
         self._read_failed = False
         self._detail_id = None
+        self._file_visible_after = None
         self.node_dialog = self.purpose_dialog = self.node_info_dialog = None
         self.edit_purpose_dialog = self.rename_dialog = self.file_info_dialog = None
         self.node_scope_var = tk.StringVar(master=parent, value="当前工作线")
@@ -109,6 +110,7 @@ class NodeFilesPanel:
         self.files_tree.grid(row=0, column=0, sticky="nsew")
         self.files_tree.tag_configure("unavailable", foreground=WARNING_INK)
         self.files_tree.bind("<<TreeviewSelect>>", self._file_selected)
+        self.files_tree.bind("<Destroy>", self._cancel_file_visibility, add='+')
         self.files_tree.bind("<Double-1>", self._double_click)
         self.files_tree.bind("<Return>", lambda _e: self._activate())
         self.files_tree.bind("<Control-c>", lambda _e: self._activate("copy"))
@@ -293,6 +295,8 @@ class NodeFilesPanel:
             self._render_files()
 
     def _render_files(self, preserve_view=False, preferred_file_id=None):
+        self._cancel_file_visibility()
+        follow_selection = False
         old_selection = self.files_tree.selection()
         previous = old_selection[0] if old_selection else None
         old_y, old_x = self.files_tree.yview(), self.files_tree.xview()
@@ -322,10 +326,6 @@ class NodeFilesPanel:
             explicit_selection = preferred is not None and selected == preferred
             self.files_tree.selection_set(selected)
             self.files_tree.focus(selected)
-            if explicit_selection and self.files_tree.winfo_viewable():
-                # Clearing a filter can add scrollbars and resize the viewport.
-                # Lay it out before making the newly linked file visible.
-                self.files_tree.update_idletasks()
             if preserve_view and previous == selected and not explicit_selection:
                 if old_y:
                     self.files_tree.yview_moveto(old_y[0])
@@ -337,7 +337,7 @@ class NodeFilesPanel:
                 # the following visible-page refresh would retain that offset.
                 self.files_tree.yview_moveto(0)
             else:
-                self.files_tree.see(selected)
+                follow_selection = True
         else:
             self.empty_label.configure(text="没有匹配的文件\n可按 Esc 清空查找" if query else
                 "此节点还没有文件\n点击下方“关联文件”或“关联文件夹”" if self.current_node_id else "新建节点，开始整理项目文件")
@@ -355,6 +355,56 @@ class NodeFilesPanel:
             self.count_var.set("读取失败 · 已保留上次清单，请刷新重试")
         self.count_label.configure(foreground=WARNING_INK if legacy or self._read_failed else MUTED)
         self._file_selected()
+        if follow_selection:
+            # Details, the count label and auto-scrollbars can resize the table.
+            # Follow an explicit/new selection only after their layout settles.
+            self._ensure_file_visible(selected)
+            self._queue_file_visibility(selected)
+
+    def _cancel_file_visibility(self, event=None):
+        if event is not None and event.widget is not self.files_tree:
+            return
+        if self._file_visible_after is not None:
+            try:
+                self.files_tree.after_cancel(self._file_visible_after)
+            except tk.TclError:
+                pass
+            self._file_visible_after = None
+
+    def _queue_file_visibility(self, identity):
+        scope = self.project_id, self.current_node_id
+        def settle():
+            self._file_visible_after = None
+            try:
+                if (scope == (self.project_id, self.current_node_id)
+                        and self.files_tree.selection() == (identity,)):
+                    self._ensure_file_visible(identity)
+            except tk.TclError:
+                # The window may close while idle geometry callbacks run.
+                pass
+        self._file_visible_after = self.files_tree.after_idle(settle)
+
+    def _ensure_file_visible(self, identity):
+        tree = self.files_tree
+        tree.update_idletasks()
+        if not tree.winfo_viewable() or not tree.exists(identity):
+            return
+        tree.see(identity)
+        tree.update_idletasks()
+        # Tk may regard a row crossing the viewport's bottom edge as visible.
+        # Correct using its actual rectangle rather than a theme/font estimate.
+        for _ in range(2):
+            bounds = tree.bbox(identity)
+            if not bounds:
+                tree.see(identity)
+            elif bounds[1] + bounds[3] > tree.winfo_height():
+                clipped = bounds[1] + bounds[3] - tree.winfo_height()
+                tree.yview_scroll(max(1, (clipped + bounds[3] - 1) // bounds[3]), 'units')
+            elif bounds[1] < 0:
+                tree.yview_scroll(-1, 'units')
+            else:
+                break
+            tree.update_idletasks()
 
     def _selected_file(self):
         selected = self.files_tree.selection()

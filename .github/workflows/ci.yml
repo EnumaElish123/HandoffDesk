@@ -22,11 +22,17 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Check public source tree
         run: python scripts/check_public_tree.py
+      - name: Check Linux source entry point
+        if: runner.os == 'Linux'
+        run: ./handoffdesk.sh --version
+      - name: Check Windows source entry point
+        if: runner.os == 'Windows'
+        run: .\handoffdesk.cmd --version
       - name: Test server commands without Tk
         run: python tests/run_tests.py --headless
       - name: Prepare Linux desktop test environment
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y xvfb python3-tk
+        run: sudo apt-get update && sudo apt-get install -y xvfb python3-tk fonts-noto-cjk
       - name: Test Linux desktop
         if: runner.os == 'Linux'
         run: |
