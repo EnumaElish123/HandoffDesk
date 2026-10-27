@@ -1213,8 +1213,7 @@ class App:
             # Detail text and its scrollbar can resize the source list.  Tk 8.6
             # otherwise computes see() from its previous viewport and leaves
             # the newly selected final row partly outside the visible area.
-            self.source_tree.update_idletasks()
-            self.source_tree.see(selected[0])
+            self._ensure_source_visible(selected[0])
             self._queue_source_reveal(selected[0])
 
     def _cancel_source_reveal(self, _event=None):
@@ -1236,13 +1235,35 @@ class App:
                 if (self.closed or scope != (self.project_id, self.workline_id)
                         or self.source_tree.selection() != (item,)):
                     return
-                self.source_tree.see(item)
+                self._ensure_source_visible(item)
             except tk.TclError:
                 pass  # The window may have closed before its idle callback.
 
         # Only an explicit selection requests this follow-up.  Normal redraws
         # and refreshes keep the user's chosen scroll position.
         self._source_reveal_after = self.source_tree.after_idle(reveal)
+
+    def _ensure_source_visible(self, item):
+        tree = self.source_tree
+        tree.update_idletasks()
+        if not tree.winfo_viewable() or not tree.exists(item):
+            return
+        tree.see(item)
+        tree.update_idletasks()
+        # Some Tk/font combinations count a row at the bottom as visible
+        # even when only its first pixels fit below the heading.
+        for _ in range(2):
+            bounds = tree.bbox(item)
+            if not bounds:
+                tree.see(item)
+            elif bounds[1] + bounds[3] > tree.winfo_height():
+                clipped = bounds[1] + bounds[3] - tree.winfo_height()
+                tree.yview_scroll(max(1, (clipped + bounds[3] - 1) // bounds[3]), 'units')
+            elif bounds[1] < 0:
+                tree.yview_scroll(-1, 'units')
+            else:
+                break
+            tree.update_idletasks()
 
     def _toggle_raw(self):
         raw = self.raw_visible.get()
