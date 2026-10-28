@@ -12,6 +12,10 @@ def app_directory(explicit=None):
         if not str(value).strip() or not path.is_absolute():
             raise ValueError('HandoffDesk 状态目录必须是本机绝对路径（--app-dir / HANDOFFDESK_HOME）。')
         return path.resolve()
+    from .integration import registered_app_directory
+    registered = registered_app_directory()
+    if registered is not None:
+        return registered
     if sys.platform == 'win32':
         base = Path(os.environ.get('LOCALAPPDATA') or Path.home() / 'AppData' / 'Local')
         if not base.is_absolute():

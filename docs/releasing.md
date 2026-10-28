@@ -26,9 +26,17 @@ data into a public repository.
    GitHub Release can be created for that commit after its checks pass.
 
 The wheel and source archive require a separately installed Python 3.10+.
-The desktop additionally needs Tk. They are not standalone executable bundles.
-Any future portable binary bundle must include the third-party runtime's
-licenses and undergo a separate clean-data and relocated-path check.
+Windows desktop additionally needs the `desktop` extra and WebView2 Runtime;
+Linux terminal reading uses the `tui` extra. Tk is only for `legacy-desktop`.
+The wheel and source archive are not standalone executable bundles.
+
+Build portable binaries with `scripts/build_portable.py` on each target OS.
+The Windows user installer is `scripts/windows-installer.iss`; its online mode
+prepares WebView2, and an explicitly supplied standalone installer supports
+offline distribution. The manually triggered portable workflow prepares
+unsigned artifacts, not a public release. See [installation acceptance](agent-first.md).
+Bundles must include runtime/dependency licenses and pass clean-machine,
+relocated-path, real Windows DPI, SSH/terminal, and actual Codex trust checks.
 
 Keep release hashes and validation logs with release artifacts. Keep logs
 containing machine paths private; a public validation note should report only

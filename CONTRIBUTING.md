@@ -4,7 +4,7 @@ Thank you for helping make project handoffs easier to trust and use. Small, focu
 
 ## Development setup
 
-Use Python 3.10 or newer. The application uses the standard library; Tk is required for desktop development. Git state collection and native opening depend on the host's installed tools.
+Use Python 3.10 or newer. The recording core uses the standard library; install `.[tui]` for terminal reader tests, `.[desktop]` on Windows for pywebview, or `.[dev]` for browser tests. Tk is needed only for the legacy desktop regression suite. Git state collection and native opening depend on the host's installed tools.
 
 ```sh
 git clone https://github.com/EnumaElish123/HandoffDesk.git

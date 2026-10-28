@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>HandoffDesk · 工作进展</title>
+  <link rel="stylesheet" href="/app.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#record-list">跳到进展记录</a>
+  <div class="workspace" id="workspace">
+    <aside class="sidebar" aria-label="项目导航">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"><i></i><i></i></span><span>Handoff<span class="brand-light">Desk</span><small>让工作，接着发生。</small></span></div>
+      <p class="nav-caption">工作空间</p>
+      <button class="nav-item selected" id="all-projects" type="button"><span class="nav-icon" aria-hidden="true">▦</span><span>全部进展</span><span class="count" id="all-count">0</span></button>
+      <div class="nav-heading"><p class="nav-caption">我的项目</p><span id="project-count" class="muted-count">0</span></div>
+      <nav id="project-list" class="project-list" aria-label="选择项目"></nav>
+      <div class="sidebar-footer"><span class="online-dot" aria-hidden="true"></span><span>仅保存在本机<small>由 Agent 记录，为你整理</small></span></div>
+    </aside>
+    <main class="main-area">
+      <header class="topbar">
+        <div><span class="eyebrow">YOUR WORK, IN CONTEXT</span><h1 id="page-title">全部进展</h1></div>
+        <div class="topbar-right"><button class="connection-button" id="connection-status" type="button">连接状态</button><span class="live-state" id="live-state"><span class="online-dot" aria-hidden="true"></span>自动更新</span><button class="icon-button" type="button" id="refresh" aria-label="刷新进展" title="刷新进展">↻</button></div>
+      </header>
+      <section class="welcome" aria-label="阅读概览"><div><h2>从这里，接着上次的工作。</h2><p id="overview-text">Agent 完成阶段工作后，进展会出现在这里。</p></div><div class="welcome-stat"><strong id="unread-count">0</strong><span>条待阅读</span></div></section>
+      <div class="mobile-project-picker"><label for="project-select">项目</label><select id="project-select"><option value="">全部项目</option></select></div>
+      <div class="reader-toolbar"><div class="tabs" aria-label="筛选记录"><button type="button" id="filter-all" class="tab active" aria-pressed="true">全部记录</button><button type="button" id="filter-unread" class="tab" aria-pressed="false">未读<span id="unread-tab-count"></span></button></div><div class="toolbar-controls"><label class="sr-only" for="workline-select">任务</label><select id="workline-select"><option value="">全部任务</option></select><label class="search"><span aria-hidden="true">⌕</span><input id="search" type="search" maxlength="200" placeholder="搜索进展…" aria-label="搜索进展"></label></div></div>
+      <div id="connection-error" class="connection-error" role="alert" hidden></div>
+      <div class="reading-layout" id="reading-layout">
+        <section class="timeline" aria-label="进展记录列表"><div class="list-heading"><span id="list-label">最近的工作</span><span class="list-number" id="list-count"></span></div><div id="record-list" class="record-list" tabindex="-1" aria-live="polite"><div class="list-placeholder">正在读取本机记录…</div></div><button id="load-more" type="button" class="load-more" hidden>加载更早的记录</button></section>
+        <section class="detail-pane" id="detail-pane" aria-label="记录详情"><div class="detail-empty"><span class="empty-symbol" aria-hidden="true">↗</span><h2>每一次进展，都有来处。</h2><p>选择左侧记录，查看完成内容、下一步和相关文件。</p></div></section>
+      </div>
+      <footer class="main-footer"><span>HandoffDesk</span><span>工作进展与文件保留在这台设备上</span></footer>
+    </main>
+  </div>
+  <div class="toast" id="toast" role="status" hidden></div>
+  <div class="modal-backdrop" id="preview-modal" hidden><section class="preview-dialog" role="dialog" aria-modal="true" aria-labelledby="preview-title"><header><div><span class="eyebrow">FILE PREVIEW</span><h2 id="preview-title">文件预览</h2></div><button id="preview-close" class="icon-button" type="button" aria-label="关闭预览">×</button></header><p class="preview-note" id="preview-note"></p><pre id="preview-content" tabindex="0"></pre><footer><span id="preview-status"></span><button class="button secondary" id="preview-copy" type="button">复制内容</button></footer></section></div>
+  <div class="modal-backdrop" id="connection-modal" hidden><section class="connection-dialog" role="dialog" aria-modal="true" aria-labelledby="connection-title"><header><div><span class="eyebrow">AGENT CONNECTION</span><h2 id="connection-title">连接状态</h2></div><button id="connection-close" class="icon-button" type="button" aria-label="关闭连接状态">×</button></header><div id="connection-content" class="connection-content" aria-live="polite"></div></section></div>
+  <noscript>HandoffDesk 阅读界面需要 JavaScript。也可以在终端使用 handoffdesk tui。</noscript>
+</body>
+</html>

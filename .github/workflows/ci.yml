@@ -29,6 +29,8 @@ jobs:
         if: runner.os == 'Windows'
         run: .\handoffdesk.cmd --version
       - name: Test server commands without Tk
+        run: python -m pip install '.[tui]'
+      - name: Run server and terminal reader tests
         run: python tests/run_tests.py --headless
       - name: Prepare Linux desktop test environment
         if: runner.os == 'Linux'

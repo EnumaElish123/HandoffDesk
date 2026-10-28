@@ -4,6 +4,9 @@ recursive-include docs *.md *.png
 recursive-include config *.example.json
 recursive-include examples *.json
 include scripts/*.py
+include scripts/*.spec scripts/*.iss
 include tests/run_tests.py tests/test_*.py
 recursive-include handoffdesk/assets *.png *.svg *.ico
+recursive-include handoffdesk/web *.html *.css *.js
+recursive-include handoffdesk/integrations *.md *.yaml
 global-exclude __pycache__ *.py[cod] *.sqlite3 *.sqlite3-* *.db *.log

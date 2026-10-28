@@ -1,6 +1,9 @@
 """SQLite persistence. Every writer uses a short transaction and its own connection."""
 import json
 import sqlite3
+from pathlib import Path
+import shutil
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
@@ -20,13 +23,19 @@ class ConflictError(ValueError):
 
 
 class Store:
-    def __init__(self, path):
-        self.path = path
+    def __init__(self, path, configuration=None):
+        self.path = Path(path)
         with self.connection() as db:
-            if db.execute('PRAGMA user_version').fetchone()[0] > 4:
+            version = db.execute('PRAGMA user_version').fetchone()[0]
+            if version > 5:
                 raise ValueError('数据库来自更新版本，请使用相应版本打开，避免降级写入。')
             db.execute("PRAGMA journal_mode=WAL")
-            db.executescript("""
+            db.execute("BEGIN IMMEDIATE")
+            # Re-read under the write lock: a concurrent opener may have migrated.
+            version = db.execute("PRAGMA user_version").fetchone()[0]
+            if 0 < version < 5:
+                self._backup_before_migration(configuration)
+            schema = """
                 CREATE TABLE IF NOT EXISTS project_state (
                     project_id TEXT PRIMARY KEY, generation INTEGER NOT NULL DEFAULT 0,
                     active_snapshot INTEGER, last_attempt TEXT, settings TEXT NOT NULL DEFAULT '{}');
@@ -49,11 +58,13 @@ class Store:
                     id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL,
                     handoff_revision INTEGER NOT NULL, snapshot_id INTEGER NOT NULL,
                     recorded_at TEXT NOT NULL, payload TEXT NOT NULL);
-            """)
+            """
+            for statement in schema.split(";"):
+                if statement.strip():
+                    db.execute(statement)
             # Existing observations and handoffs remain byte-for-byte intact.
             # A default workline retains the legacy project key. Other lines use
             # an internal scope key, so late refreshes cannot cross worklines.
-            db.execute('BEGIN IMMEDIATE')
             columns = {row['name'] for row in db.execute('PRAGMA table_info(drafts)')}
             if columns and 'event_kind' not in columns:
                 db.execute('ALTER TABLE drafts RENAME TO drafts_v2_migration')
@@ -65,7 +76,66 @@ class Store:
                 db.execute('DROP TABLE drafts_v2_migration')
             db.execute('CREATE TABLE IF NOT EXISTS file_nodes (project_id TEXT NOT NULL, node_id TEXT NOT NULL, workline_id TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(project_id,node_id))')
             db.execute('CREATE TABLE IF NOT EXISTS node_file_state (project_id TEXT NOT NULL, node_id TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(project_id,node_id))')
-            db.execute('PRAGMA user_version=4')
+            additions = """
+                CREATE TABLE IF NOT EXISTS agent_sessions (
+                    session_ref TEXT PRIMARY KEY, host TEXT NOT NULL, host_session_id TEXT,
+                    task_key TEXT NOT NULL, project_id TEXT NOT NULL, workline_id TEXT NOT NULL,
+                    cwd TEXT NOT NULL, actor TEXT NOT NULL, current_token TEXT NOT NULL,
+                    turn_ref TEXT, created_at TEXT NOT NULL,
+                    UNIQUE(host, host_session_id, task_key));
+                CREATE TABLE IF NOT EXISTS agent_checkpoints (
+                    token TEXT PRIMARY KEY, session_ref TEXT NOT NULL, turn_ref TEXT,
+                    request TEXT, request_hash TEXT, operation_id TEXT NOT NULL,
+                    base_revision INTEGER NOT NULL, status TEXT NOT NULL, receipt TEXT,
+                    error TEXT, next_token TEXT, created_at TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS checkpoint_session ON agent_checkpoints(session_ref,created_at);
+                CREATE TABLE IF NOT EXISTS agent_turns (
+                    turn_ref TEXT PRIMARY KEY, host TEXT NOT NULL, host_session_id TEXT,
+                    host_turn_id TEXT, original_turn_ref TEXT NOT NULL, disposition TEXT,
+                    receipt_ids TEXT NOT NULL DEFAULT '[]', reason TEXT NOT NULL DEFAULT '',
+                    remediation_used INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
+                    UNIQUE(host,host_session_id,host_turn_id));
+                CREATE INDEX IF NOT EXISTS turn_original ON agent_turns(original_turn_ref);
+                CREATE TABLE IF NOT EXISTS agent_reports (
+                    turn_ref TEXT NOT NULL, record_id TEXT NOT NULL, evidence_type TEXT NOT NULL,
+                    evidence_ref TEXT NOT NULL, recorded_at TEXT NOT NULL,
+                    PRIMARY KEY(turn_ref,record_id,evidence_type));
+                CREATE TABLE IF NOT EXISTS progress_events (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL,
+                    workline_id TEXT NOT NULL, record_id TEXT NOT NULL UNIQUE,
+                    recorded_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS reader_reads (
+                    reader_id TEXT NOT NULL, record_id TEXT NOT NULL, read_at TEXT NOT NULL,
+                    PRIMARY KEY(reader_id,record_id));
+            """
+            for statement in additions.split(';'):
+                if statement.strip():
+                    db.execute(statement)
+            db.execute('PRAGMA user_version=5')
+
+    def _backup_before_migration(self, configuration):
+        """A separate reader captures committed state while our write lock is held."""
+        folder = self.path.parent / 'migration-backups'
+        if not folder.resolve().is_relative_to(self.path.parent.resolve()):
+            raise ValueError('迁移备份目录不能重定向到数据目录之外。')
+        folder.mkdir(exist_ok=True)
+        stem = 'before-v5-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S') + '-' + uuid.uuid4().hex[:8]
+        backup = folder / (stem + '.sqlite3')
+        with sqlite3.connect(str(self.path), timeout=10) as source, sqlite3.connect(str(backup)) as destination:
+            source.backup(destination)
+        if configuration is not None:
+            config = Path(configuration)
+            shutil.copyfile(config, folder / (stem + '-projects.json'))
+            override = config.with_name('roots.local.json')
+            if override.is_file():
+                shutil.copyfile(override, folder / (stem + '-roots.local.json'))
+
+    @staticmethod
+    def _progress_event(db, scope, saved):
+        parts = scope.split('\x1f', 1)
+        project, line = parts[0], parts[1] if len(parts) == 2 else 'default'
+        db.execute('INSERT OR IGNORE INTO progress_events(project_id,workline_id,record_id,recorded_at) VALUES(?,?,?,?)',
+                   (project, line, f"{project}:{line}:{saved['revision']}", saved['recorded_at']))
 
     @contextmanager
     def connection(self, write=False):
@@ -179,6 +249,7 @@ class Store:
                           revision=revision + 1, recorded_at=now(), **self.scope_identity(project_id))
             db.execute('INSERT INTO handoffs(project_id,revision,recorded_at,operation_id,payload) VALUES(?,?,?,?,?)',
                        (project_id, result['revision'], result['recorded_at'], operation_id, encode(result)))
+            self._progress_event(db, project_id, result)
             return result, False
 
     def save_handoff(self, project_id, payload, expected_revision, operation_id=None):
@@ -203,6 +274,7 @@ class Store:
             result = dict(payload, revision=revision+1, recorded_at=now(), **self.scope_identity(project_id))
             db.execute("INSERT INTO handoffs(project_id,revision,recorded_at,operation_id,payload) VALUES (?,?,?,?,?)",
                        (project_id, result["revision"], result["recorded_at"], operation_id, encode(result)))
+            self._progress_event(db, project_id, result)
             return result
 
     def history(self, project_id):
@@ -357,3 +429,48 @@ class Store:
             value['id'] = cursor.lastrowid
             db.execute('UPDATE reviews SET payload=? WHERE id=?', (encode(value),value['id']))
         return value
+
+    def commit_checkpoint(self, token, prepared, manifest_factory, response_factory):
+        """One transaction publishes record, receipt, next token and reader event."""
+        with self.connection(True) as db:
+            checkpoint = db.execute('SELECT * FROM agent_checkpoints WHERE token=?', (token,)).fetchone()
+            if checkpoint is None:
+                raise ValueError('提交令牌不存在。')
+            if checkpoint['receipt']:
+                return dict(json.loads(checkpoint['receipt']), replayed=True)
+            if checkpoint['status'] == 'superseded':
+                raise ValueError('此令牌已被明确替换，请使用新的令牌。')
+            if checkpoint['request'] is None or checkpoint['base_revision'] != prepared['expected_revision']:
+                raise ValueError('提交请求尚未持久化或基准版本不一致。')
+            row = db.execute('SELECT payload FROM handoffs WHERE project_id=? AND operation_id=?',
+                             (prepared['scope'], prepared['operation_id'])).fetchone()
+            if row:
+                saved = json.loads(row[0])
+                if saved.get('agent_request_hash') != prepared['digest']:
+                    raise ValueError('相同操作编号已用于另一份内容。')
+                replayed = True
+            else:
+                row = db.execute('SELECT payload,revision FROM handoffs WHERE project_id=? ORDER BY revision DESC LIMIT 1',
+                                 (prepared['scope'],)).fetchone()
+                current = json.loads(row['payload']) if row else None
+                if prepared['expected_revision'] != (row['revision'] if row else 0):
+                    raise ConflictError(current, prepared['record'])
+                manifest = manifest_factory()
+                saved = dict(prepared['record'], file_manifest=manifest, agent_request_hash=prepared['digest'],
+                             revision=prepared['expected_revision'] + 1, recorded_at=now(),
+                             **self.scope_identity(prepared['scope']))
+                db.execute('INSERT INTO handoffs(project_id,revision,recorded_at,operation_id,payload) VALUES(?,?,?,?,?)',
+                           (prepared['scope'], saved['revision'], saved['recorded_at'],
+                            prepared['operation_id'], encode(saved)))
+                replayed = False
+            next_token = 'checkpoint-' + uuid.uuid4().hex
+            receipt = response_factory(saved, replayed, next_token)
+            self._progress_event(db, prepared['scope'], saved)
+            db.execute('UPDATE agent_checkpoints SET status=\'committed\',receipt=?,error=NULL,next_token=? WHERE token=?',
+                       (encode(receipt), next_token, token))
+            db.execute('INSERT INTO agent_checkpoints(token,session_ref,operation_id,base_revision,status,created_at) VALUES(?,?,?,?,?,?)',
+                       (next_token, checkpoint['session_ref'], 'hdk-' + uuid.uuid4().hex,
+                        saved['revision'], 'issued', now()))
+            db.execute('UPDATE agent_sessions SET current_token=? WHERE session_ref=?',
+                       (next_token, checkpoint['session_ref']))
+            return receipt

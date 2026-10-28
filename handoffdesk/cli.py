@@ -21,9 +21,9 @@ def scoped_project(parser, json_flag=False):
 
 
 def main(argv=None):
-    from . import agent_cli
+    from . import agent_cli, agent_session_cli, integration_cli
     actual_argv = list(sys.argv[1:] if argv is None else argv)
-    machine = any(item in agent_cli.COMMANDS | {'init', 'project'} for item in actual_argv)
+    machine = '--json' in actual_argv or any(item in agent_cli.COMMANDS | integration_cli.COMMANDS | {'init', 'project', 'agent', 'feed', 'read'} for item in actual_argv)
 
     class Parser(argparse.ArgumentParser):
         def error(self, message):
@@ -37,7 +37,21 @@ def main(argv=None):
     parser.add_argument("--data-dir", type=Path, help="独立数据目录（禁止放入接入项目）")
     parser.add_argument("--app-dir", type=Path, help="状态目录，含 config/projects.json 与 data；优先于 HANDOFFDESK_HOME")
     subs = parser.add_subparsers(dest="command")
-    subs.add_parser("desktop", help="打开本地窗口（默认）")
+    desktop = subs.add_parser("desktop", help="打开本地 Web 桌面窗口（Windows 默认）")
+    desktop.add_argument('--browser', action='store_true', help='在本机浏览器预览；仅监听回环地址')
+    subs.add_parser('legacy-desktop', help='打开旧 Tk 窗口（兼容入口）')
+    subs.add_parser('tui', help='在终端阅读进展，无需图形环境（Linux 默认）')
+    feed = subs.add_parser('feed', help='查询各项目的最新阶段记录')
+    feed.add_argument('--project')
+    feed.add_argument('--workline')
+    feed.add_argument('--limit', type=int, default=50)
+    feed.add_argument('--cursor', type=int)
+    feed.add_argument('--unread', action='store_true')
+    feed.add_argument('--query', default='')
+    read = subs.add_parser('read', help='按记录编号阅读完整阶段及文件')
+    read.add_argument('record_id')
+    read.add_argument('--markdown', action='store_true')
+    read.add_argument('--ack', action='store_true', help='明确标记这条记录已读')
     init = subs.add_parser('init', help='首次初始化；无参数创建本地通用示例，已有配置不会覆盖')
     init.add_argument('--project', dest='project_id')
     init.add_argument('--name')
@@ -104,8 +118,37 @@ def main(argv=None):
     cmd.add_argument("project")
     cmd.add_argument("--job-id", help="留空字符串恢复历史示例；省略参数则列出候选")
     agent_cli.add_parsers(subs)
+    agent_session_cli.register(subs)
+    integration_cli.register(subs)
     args = parser.parse_args(actual_argv)
     try:
+        if args.command == 'agent':
+            output(agent_session_cli.run(args))
+            return 0
+        if args.command in integration_cli.COMMANDS:
+            result = integration_cli.run(args)
+            if result is not None:
+                output(result)
+            if args.command == 'doctor' and result and not result.get('ok'):
+                return 2
+            return 0
+        command = args.command or ('desktop' if sys.platform == 'win32' else 'tui')
+        if command == 'tui':
+            from .tui import run
+            return run(args.app_dir, args.data_dir)
+        if command == 'desktop':
+            from .web_desktop import run
+            return run(args.app_dir, args.data_dir, browser=getattr(args, 'browser', False)) or 0
+        if command in {'feed', 'read'}:
+            from .reader import ReaderModel
+            model = ReaderModel(args.app_dir, args.data_dir)
+            if command == 'feed':
+                output(model.records(args.project, args.workline, args.limit, args.cursor, args.unread, args.query))
+            else:
+                print(model.export(args.record_id)) if args.markdown else output(model.detail(args.record_id))
+                if args.ack:
+                    model.ack([args.record_id])
+            return 0
         if args.command == 'init':
             from .bootstrap import initialize
             output(initialize(args.app_dir, project_id=args.project_id, name=args.name, root=args.root, data_dir=args.data_dir))
@@ -121,10 +164,9 @@ def main(argv=None):
             output(agent_cli.configure_roots(args.app_dir, args.file, args.data_dir))
             return 0
         service = Service(args.app_dir, args.data_dir)
-        command = args.command or "desktop"
         if command in agent_cli.COMMANDS:
             output(agent_cli.dispatch(args, service, sys.stdin))
-        elif command == "desktop":
+        elif command == "legacy-desktop":
             from . import platform_io
             platform_io.ensure_desktop(tk_required=True)
             from .desktop import main as desktop_main
@@ -191,7 +233,11 @@ def main(argv=None):
         return 3
     except (ValueError, OSError, sqlite3.Error) as exc:
         if machine:
-            output({'schema_version': 1, 'ok': False, 'error': {'code': 'invalid_input' if isinstance(exc, ValueError) else 'unavailable', 'message': str(exc)}})
+            error = {'code': getattr(exc, 'code', 'invalid_input' if isinstance(exc, ValueError) else 'unavailable'), 'message': str(exc)}
+            for field in ('retryable', 'saved', 'details'):
+                if hasattr(exc, field):
+                    error[field] = getattr(exc, field)
+            output({'schema_version': 1, 'ok': False, 'error': error})
         else:
             print(f"错误：{exc}", file=sys.stderr)
         return 2

@@ -13,17 +13,18 @@ def run():
     try:
         if windowed:
             from .registry import Registry
-            from .paths import app_directory, require_configuration
+            from .paths import app_directory, configuration_path
             options = argparse.ArgumentParser(add_help=False)
             options.add_argument('--app-dir', type=Path)
             options.add_argument('--data-dir', type=Path)
             paths, _ = options.parse_known_args()
             app_dir = app_directory(paths.app_dir)
-            registry = Registry(require_configuration(app_dir))
+            config = configuration_path(app_dir)
+            projects = Registry(config).projects if config.exists() else []
             folder = Path(paths.data_dir or app_dir / 'data').resolve()
             log_path = (folder / 'startup.log').resolve()
             if not log_path.is_relative_to(folder) or any(folder.is_relative_to(Path(root).resolve()) or log_path.is_relative_to(Path(root).resolve())
-                    for project in registry.projects for root in project['roots'].values()):
+                    for project in projects for root in project['roots'].values()):
                 raise ValueError('工具日志路径指向业务项目或数据目录之外，已停止写入。')
             folder.mkdir(parents=True, exist_ok=True)
             log = log_path.open('a', encoding='utf-8')

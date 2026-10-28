@@ -52,8 +52,26 @@ def main():
         import handoffdesk
         assets = Path(handoffdesk.__file__).parent / 'assets'
         assert all((assets / name).is_file() for name in ['app.png', 'app.ico', 'app.svg'])
+        package = assets.parent
+        assert all((package / 'web' / name).is_file() for name in ['index.html', 'app.css', 'app.js'])
+        assert (package / 'integrations/handoffdesk/SKILL.md').is_file()
+        assert (package / 'integrations/handoffdesk/agents/openai.yaml').is_file()
+        session = run('agent', 'begin', '--cwd', str(source), '--task', 'Installed package check', '--actor', 'Smoke agent')
+        semantic = {'kind': 'handoff', 'title': 'Installed session workflow',
+                    'actual_done': 'Checked packaged reader resources and automatic task binding.',
+                    'next_action': 'Read this result.', 'files': [{'path': note.name, 'purpose': 'Package test artifact'}]}
+        checkpoint = run('agent', 'checkpoint', '--session', session['session_ref'],
+                         '--checkpoint', session['checkpoint_token'], '--stdin', payload=semantic)
+        repeated = run('agent', 'checkpoint', '--session', session['session_ref'],
+                       '--checkpoint', session['checkpoint_token'], '--stdin', payload=semantic)
+        assert repeated['replayed'] and repeated['record_id'] == checkpoint['record_id']
+        read = run('read', checkpoint['record_id'])
+        assert read['files'][0]['path'] == str(note)
+        assert read['verification']['status'] == 'not_run'
+        assert run('feed')['items'][0]['id'] == checkpoint['record_id']
         print(json.dumps({'installed_package': True, 'init': True, 'agent_save': True, 'idempotency': True,
                           'conflict': True, 'file_manifest': True, 'source_preserved': True,
+                          'agent_session': True, 'reader_assets': True, 'shared_feed': True,
                           'tkinter_imported': 'tkinter' in sys.modules}))
 
 

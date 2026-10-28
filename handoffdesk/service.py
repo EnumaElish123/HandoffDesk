@@ -39,7 +39,7 @@ class Service:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         for name in ('cards.sqlite3-wal', 'cards.sqlite3-shm', 'cards.sqlite3-journal'):
             self._write_path(name)
-        self.store = Store(self._write_path('cards.sqlite3'))
+        self.store = Store(self._write_path('cards.sqlite3'), configuration=require_configuration(self.app_dir))
         self.node_files = NodeFiles(self)
         self._focus_lock = threading.RLock()
 

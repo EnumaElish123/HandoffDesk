@@ -228,7 +228,7 @@ class AgentRecordTests(unittest.TestCase):
         self.assertEqual(result['revision'], 2)
         with self.service.store.connection() as db:
             self.assertEqual(tuple(db.execute('SELECT * FROM handoffs WHERE revision=1').fetchone()), before)
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 4)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 5)
 
 
 if __name__ == '__main__':

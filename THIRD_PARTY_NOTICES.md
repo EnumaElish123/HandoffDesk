@@ -7,8 +7,15 @@ license in `LICENSE`.
 This source distribution does not bundle a Python interpreter, Tcl/Tk runtime,
 operating system fonts, or other third-party binary libraries. HandoffDesk uses
 Python's standard library, including SQLite, and optionally Tkinter for the
-desktop. Those components remain under their respective licenses provided by
-their distributors. There are no third-party Python runtime dependencies.
+legacy desktop. Those components remain under their respective licenses provided by
+their distributors. The core command line has no third-party runtime dependencies.
+
+Optional readers use Textual 6.12.0 (MIT) and pywebview 6.2.1 (BSD-3-Clause).
+Textual depends on Rich, markdown-it-py, Pygments and related packages; pywebview
+uses the platform Web engine and, on Windows, pythonnet and WebView2. Their
+respective installed distribution licenses must accompany binary packages.
+Microsoft WebView2 Runtime is distributed under Microsoft's terms. The local
+HTML/CSS/JavaScript frontend contains no CDN assets or third-party UI framework.
 
 Development and packaging tools such as setuptools and GitHub Actions are
 external tools, not part of the application source. Their own licenses apply.

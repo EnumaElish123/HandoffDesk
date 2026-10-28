@@ -19,16 +19,16 @@ The interface is currently primarily Chinese. Agent commands use structured JSON
 
 ## Quick start
 
-Requires **Python 3.10+**. The desktop also requires Tk. Use `python3` in place of `python` if that is the name of your Python interpreter.
+Source development requires **Python 3.10+**. Windows uses a local WebView2 desktop; Linux uses a Textual terminal reader. Use `python3` in place of `python` where needed.
 
 ```sh
 git clone https://github.com/EnumaElish123/HandoffDesk.git
 cd HandoffDesk
-python -m handoffdesk init
-python -m handoffdesk desktop
+python -m pip install '.[tui]'
+handoffdesk tui
 ```
 
-`init` creates a small demo and local configuration in your user data directory. It does not import existing projects or records. To initialize a real project instead of the demo, start with:
+On Windows install `'.[desktop]'` and run `handoffdesk desktop`. Readers start with an empty project list on a fresh installation. `handoffdesk connect codex` installs the managed skill and optional hooks; Codex still requires its own hook trust. See the [agent-first workflow](docs/agent-first.md). The old Tk interface is available as `handoffdesk legacy-desktop`. To manually initialize a real project:
 
 ```sh
 python -m handoffdesk init --project alpha --name "My project" --root /absolute/path/to/your-project
@@ -48,10 +48,10 @@ This is a source installation. These instructions do not assume a package has be
 
 ## Agent to human workflow
 
-1. The agent reads `record context alpha --workline default` and uses the returned revision.
-2. At a meaningful milestone, the agent prepares a record containing actual progress, the next action, verification scope, and related local files.
-3. It runs `record validate --file submission.json`, then `record save --file submission.json`, and checks the JSON receipt.
-4. The person opens the desktop, accepts the new progress notice, and uses **本次文件** to see exactly that stage's files.
+1. The agent calls `agent begin --cwd … --task …` to bind the project and task.
+2. At a meaningful milestone it calls `agent checkpoint` with actual progress, next action, verification scope and related files.
+3. It checks the durable receipt and immediately reports the saved record to the user; retries reuse the original checkpoint token.
+4. The person opens the Windows desktop or Linux TUI. New records appear automatically while the current detail stays in place; unread state is tracked per record.
 
 Prefix the commands above with `handoffdesk` after installation, or `python -m handoffdesk` from the source checkout. The [agent guide](docs/agents.md) includes the payload, error handling, and a reusable instruction for project agents. HandoffDesk does not automatically capture other agents' conversations; those agents must call the interface.
 
@@ -76,7 +76,7 @@ Keep state outside registered project roots. Desktop and agent processes must us
 
 File associations store locations and purposes; they do not back up or transfer project files. Source snapshots may contain bounded excerpts of explicitly registered documents. Cross machine root mappings do not synchronize databases or rewrite historical file paths. A server's files need a desktop on that machine or separately mounted/transferred files to open locally.
 
-HandoffDesk does not launch project scripts, training jobs, or development servers. Document opening uses the desktop's default application; scripts open as text and models or unknown file types reveal their directory. The tool has no web server or remote API.
+HandoffDesk does not launch project scripts, training jobs, or development servers. Document opening uses the desktop's default application; scripts open as read-only text and models or unknown file types reveal their directory. The local frontend uses a loopback-only static server; optional browser preview authenticates requests with a per-process token. It is not a remote server or a cloud service.
 
 ## Development
 

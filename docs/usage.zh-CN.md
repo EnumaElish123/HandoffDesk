@@ -1,6 +1,10 @@
 # HandoffDesk 使用手册
 
-适用于 HandoffDesk 0.9.0；Agent 记录协议版本为 1。安装和首次初始化见 [中文 README](../README.zh-CN.md)。本手册中的项目 ID `alpha` 和路径都是示例，使用时替换为已登记项目与实际本机路径。
+0.10 默认使用 Windows 本地 Web 阅读器和 Linux TUI，安装见 [中文 README](../README.zh-CN.md)，自动接入见 [低配置接入](agent-first.md)。新阅读器可筛选项目、任务、未读，搜索正文；选择阶段查看完整说明、验证与附件，支持预览、复制和导出。新记录自动更新列表而保留当前详情。
+
+Linux 按上下键或 j/k 选记录、Enter 阅读、Esc 返回、/ 搜索、p 选项目、f 看附件、u 切换未读、n 加载更早记录、q 退出。输入框内字母正常输入；SSH 的文件位置属于服务器，剪贴板能力由终端决定。
+
+以下章节保留为原有工作线、节点、草稿和来源复核的高级参考。相关旧窗口操作请用 `handoffdesk legacy-desktop`；默认 Web 阅读器以阶段阅读为主。Agent 记录协议仍为 1。示例 ID `alpha` 和路径应替换为实际值。
 
 ## 1. 理解项目、工作线和节点
 
@@ -29,7 +33,7 @@ python -m handoffdesk init --project alpha --name "我的项目" --root /absolut
 ```sh
 python -m handoffdesk project add alpha --name "我的项目" --root /absolute/path/to/your-project
 python -m handoffdesk list --json
-python -m handoffdesk desktop
+python -m handoffdesk legacy-desktop
 ```
 
 注册根目录不会自动递归扫描整个项目，也不会自动修改项目内的 `AGENTS.md`。来源和材料入口可在状态目录的 `config/projects.json` 中明确登记，详见 [配置说明](configuration.md)。桌面中新建工作线可以将不同任务分开。

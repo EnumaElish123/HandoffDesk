@@ -4,6 +4,8 @@ import os
 from pathlib import Path, PureWindowsPath
 import re
 import tempfile
+import time
+from contextlib import contextmanager
 
 from .paths import app_directory, configuration_path, require_configuration, validate_configuration_writes
 from .registry import Registry
@@ -27,33 +29,66 @@ def _project(app, project_id, name, root, data_dir=None):
     return project
 
 
-def _write(app, target, value, *, create):
-    """Serialize cooperating writers and atomically publish a validated config."""
-    config = target.parent
+@contextmanager
+def configuration_lock(app, timeout=10):
+    """OS-owned lock is released on process exit; legacy directory locks stay explicit."""
+    config = configuration_path(app).parent
     config.mkdir(parents=True, exist_ok=True)
+    if (config / '.projects.lock').exists():
+        raise ValueError('项目配置正在被更新；请确认旧版本写入已结束后再处理 config/.projects.lock。')
+    guard = config / '.projects.guard'
+    if guard.is_symlink() or not guard.resolve().is_relative_to(config):
+        raise ValueError('项目配置锁不能重定向。')
+    handle = guard.open('a+b')
+    acquired = False
+    try:
+        if handle.tell() == 0:
+            handle.write(b'0')
+            handle.flush()
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                if os.name == 'nt':
+                    import msvcrt
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except (OSError, BlockingIOError):
+                if time.monotonic() >= deadline:
+                    raise ValueError('项目配置正在被更新；请稍后重试。')
+                time.sleep(0.05)
+        yield
+    finally:
+        if acquired:
+            if os.name == 'nt':
+                import msvcrt
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+
+def _publish(app, target, value, *, create):
+    """Caller holds configuration_lock; validate and atomically publish."""
+    config = target.parent
     if configuration_path(app) != target:
         raise ValueError('配置路径在操作期间发生变化。')
-    lock = config / '.projects.lock'
-    try:
-        lock.mkdir()
-    except FileExistsError as exc:
-        raise ValueError('项目配置正在被更新；请稍后重试。如上次进程意外结束，请确认没有写入进程后删除 config/.projects.lock。') from exc
     pending = None
     try:
         if create and (target.exists() or target.is_symlink()):
             raise ValueError('已存在项目配置，init 不会覆盖；请使用 handoffdesk project add 添加项目。')
-        if not create:
-            # Reject concurrent edits between our initial read and write.
-            expected = value.pop('_expected_bytes')
-            if target.read_bytes() != expected:
-                raise ValueError('项目配置已变化，请重新运行 project add。')
         encoded = (json.dumps(value, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
         with tempfile.NamedTemporaryFile(mode='wb', dir=config, prefix='.projects-', suffix='.tmp', delete=False) as handle:
             pending = Path(handle.name)
             handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
-        # Registry resolves roots.local.json next to this file as usual.
         Registry(pending)
         if configuration_path(app) != target:
             raise ValueError('配置路径在操作期间发生变化。')
@@ -62,7 +97,15 @@ def _write(app, target, value, *, create):
     finally:
         if pending is not None:
             pending.unlink(missing_ok=True)
-        lock.rmdir()
+
+
+def _write(app, target, value, *, create):
+    with configuration_lock(app):
+        if not create and '_expected_bytes' in value:
+            expected = value.pop('_expected_bytes')
+            if target.read_bytes() != expected:
+                raise ValueError('项目配置已变化，请重新运行 project add。')
+        _publish(app, target, value, create=create)
 
 
 def initialize(app_dir=None, *, project_id=None, name=None, root=None, data_dir=None):
@@ -98,22 +141,23 @@ def initialize(app_dir=None, *, project_id=None, name=None, root=None, data_dir=
 def add_project(app_dir, project_id, *, name=None, root, data_dir=None):
     app = app_directory(app_dir)
     target = require_configuration(app)
-    original = target.read_bytes()
-    registry = Registry(target)
-    # Existing manual configuration/local mappings must also be safe before
-    # creating the lock and temporary file next to projects.json.
-    validate_configuration_writes(app, registry.projects, data_dir)
-    if any(project['id'] == project_id for project in registry.projects):
-        raise ValueError('项目 ID 已存在，请使用不同编号。')
+    # Reject unsafe existing mappings before creating the lock file.
+    validate_configuration_writes(app, Registry(target).projects, data_dir)
     project = _project(app, project_id, name, root, data_dir)
-    new_root = Path(project['roots']['main'])
-    for existing in registry.projects:
-        for value in existing['roots'].values():
-            known = Path(value).resolve()
-            if new_root.is_relative_to(known) or known.is_relative_to(new_root):
-                raise ValueError('项目根目录与已登记项目重叠，请选择独立目录。')
-    value = json.loads(original.decode('utf-8-sig'))
-    value['projects'].append(project)
-    value['_expected_bytes'] = original
-    _write(app, target, value, create=False)
+    with configuration_lock(app):
+        # Re-read after acquiring the lock: parallel registrations are merged.
+        original = target.read_bytes()
+        registry = Registry(target)
+        validate_configuration_writes(app, registry.projects, data_dir)
+        if any(item['id'] == project_id for item in registry.projects):
+            raise ValueError('项目 ID 已存在，请使用不同编号。')
+        new_root = Path(project['roots']['main'])
+        for existing in registry.projects:
+            for value in existing['roots'].values():
+                known = Path(value).resolve()
+                if new_root.is_relative_to(known) or known.is_relative_to(new_root):
+                    raise ValueError('项目根目录与已登记项目重叠，请选择独立目录。')
+        value = json.loads(original.decode('utf-8-sig'))
+        value['projects'].append(project)
+        _publish(app, target, value, create=False)
     return {'schema_version': 1, 'ok': True, 'added': True, 'app_dir': str(app), 'configuration': str(target), 'project': project}

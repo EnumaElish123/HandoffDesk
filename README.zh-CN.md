@@ -2,7 +2,7 @@
 
 **让 Agent 保存进度，让人带着正确的文件继续工作。**
 
-HandoffDesk 把“这次实际完成了什么、下一步做什么、有什么阻塞、验证到什么程度，以及对应哪些文件”保存在本机。Agent 通过结构化命令记录，人类通过桌面窗口阅读、查找并打开每个阶段的文件。
+HandoffDesk 把“这次实际完成了什么、下一步做什么、有什么阻塞、验证到什么程度，以及对应哪些文件”保存在本机。Agent 通过简化命令记录，Windows 用户在本地 Web 桌面窗口阅读，Linux 用户在终端阅读器中查找历史与文件。
 
 [English](README.md) · [完整使用手册](docs/usage.zh-CN.md) · [Agent 接入](docs/agents.md) · [Ubuntu 桌面与服务器](docs/ubuntu.md)
 
@@ -13,22 +13,32 @@ HandoffDesk 把“这次实际完成了什么、下一步做什么、有什么�
 - 关联文件或文件夹、搜索、复制路径、打开文件、定位资源管理器；文件搬家后重新定位，移除关联保留原文件。
 - Agent 一次提交进度和文件清单，支持协议发现、预检查、重试去重、并发冲突检测和作者标注。
 - 读取明确登记的本地文档、JSON 字段和 Git 状态，比较来源变化，导出本机 Markdown 摘要。
-- Windows 和 Ubuntu 桌面可视化使用；Ubuntu 服务器无界面记录和查询。应用本身不提供网络服务。
+- Windows 本地 Web 桌面与 Linux TUI 共用阅读模型，支持搜索、未读、完整详情、附件预览和 Markdown 导出。
+- 一次连接 Codex，安装用户级 Skill 和可选 hooks；任务自动绑定项目，保存失败或未汇报可恢复。首次 hook 信任由 Codex 管理。
 
 当前桌面主要使用中文；命令接口返回 JSON。
 
 ## 先试用
 
-准备 Python 3.10 或更高版本；桌面还需要同一解释器能使用 Tk。Ubuntu 命令通常使用 `python3`，依赖安装见 [Ubuntu 说明](docs/ubuntu.md)。
+源码开发需要 Python 3.10+。以下安装当前源码，不假设已发布到 PyPI。Windows 的 Web 桌面使用 WebView2 Runtime；Linux TUI 无需 Tk、X11 或浏览器。
 
 ```sh
 git clone https://github.com/EnumaElish123/HandoffDesk.git
 cd HandoffDesk
-python -m handoffdesk init
-python -m handoffdesk desktop
+python -m pip install '.[tui]'
+handoffdesk tui
 ```
 
-首次 `init` 在用户数据目录生成通用演示项目和本机配置。它不会读取你的其他项目，也不会导入历史记录。若首次就接入真实项目，用以下命令代替无参数的 `init`：
+Windows 将安装参数改为 `'.[desktop]'`，运行 `handoffdesk desktop`。阅读器首次打开为空状态，不需要创建示例项目。开发时也可运行 `handoffdesk desktop --browser`，只在本机浏览器预览，关闭命令后停止服务。旧 Tk 窗口保留为 `handoffdesk legacy-desktop`。
+
+连接 Codex：
+
+```sh
+handoffdesk connect codex
+handoffdesk doctor --probe
+```
+
+连接器保留已有配置，不覆盖 AGENTS.md。按 Codex 提示信任 hooks；健康检查不会仅凭安装文件存在宣称全自动就绪。完整步骤、能力限制与撤销见 [低配置接入](docs/agent-first.md)。如果只想手动接入项目，可继续使用兼容命令：
 
 ```sh
 python -m handoffdesk init --project alpha --name "我的项目" --root /absolute/path/to/your-project
@@ -44,9 +54,11 @@ python -m handoffdesk project add beta --name "另一个项目" --root /absolute
 
 ## 日常怎么用
 
-Agent 开始工作时读取明确的项目和工作线，完成阶段或需要交接时提交事实、验证范围、下一步和文件清单。人类打开窗口，点击“有新进度，点击更新”，查看首页的进度和“本次文件”。选择历史节点即可回到那个阶段的文件清单。
+Agent 开始任务时运行 `agent begin --cwd … --task …`，之后每个有意义的阶段提交一次 `agent checkpoint`，收到回执后立即向用户汇报记录编号、验证范围和文件数。程序处理项目、任务绑定、版本和重试。纯问答不生成空进展记录。
 
-首次接入 Agent 的完整命令、提交 JSON、重试规则和可复制的项目约定见 [Agent 接入](docs/agents.md)。把约定交给 Agent 后，仍需要它实际执行命令；工具不会自动监听或保存其他会话。
+用户打开阅读器查看“最新进展”，筛选项目或未读，选择阶段查看完整正文和本次附件。新记录自动进入列表，当前详情保持不动。打开一条记录只确认该条已读，不清空其他项目的未读。
+
+低配置接口见 [低配置接入](docs/agent-first.md)，原协议 1 见 [Agent 接入](docs/agents.md)。工具不采集全部聊天记录；Skill-only 模式的调用取决于 Agent，不能保证每轮自动执行。
 
 ## 数据在哪里
 
@@ -59,7 +71,7 @@ Agent 开始工作时读取明确的项目和工作线，完成阶段或需要�
 
 可以用绝对路径的 `HANDOFFDESK_HOME`，或命令前的 `--app-dir` 指定目录；显式 `--app-dir` 优先。Agent 与桌面应使用同一目录。状态和数据库不能放进接入的项目根目录。
 
-开源版与原个人安装独立使用，不自动迁移旧数据。旧版升级、备份和多机器路径设置见 [配置与迁移](docs/configuration.md)。
+打开既有状态目录时，数据库版本 4 自动备份后升级为 5，保留原始交接内容和编号。不要用旧程序写升级后的数据库；回退使用迁移前备份。安装登记用于所有入口定位同一状态，优先级为显式 `--app-dir`、`HANDOFFDESK_HOME`、安装登记、平台默认。旧安装路径接入见 [配置与迁移](docs/configuration.md)。
 
 文件关联只保存位置和用途，不复制业务文件；登记来源的快照可能缓存文档节选。工具没有跨机器自动同步或文件传输功能。实际隐私边界及发布前检查见 [隐私说明](docs/privacy.md)。
 

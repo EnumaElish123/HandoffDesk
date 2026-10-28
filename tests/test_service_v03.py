@@ -258,7 +258,7 @@ class V03ServiceTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT payload FROM handoffs').fetchone()[0],original_handoff)
             self.assertEqual(db.execute('SELECT payload FROM snapshots').fetchall(),original_snapshots)
             self.assertEqual(db.execute('SELECT payload FROM drafts').fetchone()[0],old_draft)
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0],4)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0],5)
         db.close()
 
     def test_rvc_job_switch_returns_to_its_own_plan(self):

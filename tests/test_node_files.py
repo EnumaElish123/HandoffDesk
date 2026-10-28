@@ -334,7 +334,7 @@ class NodeFileTests(unittest.TestCase):
         self.service = Service(self.app)
         with closing(sqlite3.connect(db_path)) as db:
             after = db.execute('SELECT payload FROM handoffs').fetchall(),db.execute('SELECT payload FROM snapshots').fetchall()
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0],4)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0],5)
         self.assertEqual(before,after)
 
 

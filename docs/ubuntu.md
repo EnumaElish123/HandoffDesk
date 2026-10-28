@@ -1,16 +1,16 @@
 # Ubuntu 桌面与服务器
 
-HandoffDesk 0.9.0 使用 Python 3.10+。服务器的 Agent 记录与查询不需要 Tk 或图形显示；桌面查看和打开文件需要同一解释器的 Tk 及真实桌面会话。源码仓库不附带 Python、Tcl/Tk 或系统软件包。
+HandoffDesk 0.10 的 Linux 默认阅读方式是 TUI。源码开发使用 Python 3.10+ 和 `pip install '.[tui]'`，随后运行 `handoffdesk tui`；Agent 记录命令不依赖 Textual、Tk 或图形显示。用户级安装与便携包见 [安装说明](agent-first.md)。下面保留的 Tk 和桌面依赖只适用于显式 `legacy-desktop` 兼容入口。
 
 ## 选择运行方式
 
 | 环境 | 可以做什么 | 需要准备 |
 | --- | --- | --- |
-| 无界面服务器 / SSH | 初始化、记录、查询、节点和文件清单、导出 | Python 3.10+；可选 Git |
+| 无界面服务器 / SSH | 终端阅读、搜索、未读、附件预览；记录、查询、导出 | 安装 tui 组件；源码需 Python 3.10+，便携包自带运行时 |
 | 本地 Ubuntu 桌面 | 完整窗口、查看进度、打开文件、文件管理器定位 | 匹配的 Tk、字体、默认应用和桌面接口 |
 | Ubuntu 远程桌面 | 与本机桌面相同，操作远端机器的本机文件 | 已连接且可用的远程图形会话 |
 
-工具没有 Web 界面、HTTP API 或常驻服务，通常无需后台运行。CLI 保存后直接退出，数据保存在本机 SQLite 中。
+CLI 保存后直接退出，TUI 不启动 HTTP 服务。可选 `desktop --browser` 提供仅回环地址的本机 Web 预览，不负责 SSH 转发或跨机器同步。Windows 的默认入口是 Web 桌面窗口。
 
 ## 安装系统依赖
 
@@ -87,7 +87,7 @@ handoffdesk files alpha --node record:default:1
 在已登录的本地或远程桌面终端运行：
 
 ```sh
-handoffdesk desktop
+handoffdesk legacy-desktop
 ```
 
 Tk 需要有效的 `DISPLAY`；Wayland 桌面通常由 XWayland 提供。不要把手工设置一个 `DISPLAY` 字符串当成图形连接已经建立，应在实际图形会话中启动。还需有当前用户可用的桌面总线和默认文件应用。

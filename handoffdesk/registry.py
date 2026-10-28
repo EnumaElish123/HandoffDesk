@@ -25,7 +25,7 @@ class Registry:
         if not isinstance(self.config, dict) or self.config.get("schema_version") != 1:
             raise RegistryError("项目登记 schema_version 必须为 1")
         self.projects = self.config.get("projects")
-        if not isinstance(self.projects, list) or not self.projects:
+        if not isinstance(self.projects, list):
             raise RegistryError("项目登记必须包含 projects 列表")
         self.defaults = self.config.get("defaults", {})
         override_path = self.path.with_name('roots.local.json')
