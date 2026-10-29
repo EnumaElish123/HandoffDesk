@@ -52,9 +52,17 @@ python -m handoffdesk project add beta --name "另一个项目" --root /absolute
 
 从任意目录调用可先在源码目录运行 `python -m pip install .`，随后使用 `handoffdesk` 命令。这里安装的是当前源码，不假设项目已发布到 PyPI。
 
+## Linux 安装与阅读
+
+从源码希望一次安装并接入时，运行 `python scripts/install.py`。安装器沿用已登记的记录目录，并输出立即可用的启动命令；`--no-connect` 仅安装阅读器。已有同名命令会保留，首次 hooks 信任仍由 Codex 确认。`handoffdesk doctor --human --probe` 显示当前接入状态和下一步。
+
+终端阅读支持任务筛选、按任务名搜索，以及小窗口附件阅读。`/` 搜索、`p` 项目、`t` 任务、`u` 未读、`f` 附件、`e` 导出、`c` 接入状态、`y` 复制续接提示、`x` 清空筛选、`?` 帮助。附件中 Enter 阅读，PgUp/PgDn 翻页，`m` 查看位置/用途，Esc 返回。导出需确认位置，已有文件不会被覆盖。
+
+时间默认按系统时区显示并带 UTC 偏移；远端系统时区与自己不同时，可选用 `HANDOFFDESK_TIMEZONE=Asia/Shanghai handoffdesk tui`。状态和附件均属于运行工具的机器；终端复制到本机剪贴板取决于终端支持。
+
 ## 日常怎么用
 
-Agent 开始任务时运行 `agent begin --cwd … --task …`，之后每个有意义的阶段提交一次 `agent checkpoint`，收到回执后立即向用户汇报记录编号、验证范围和文件数。程序处理项目、任务绑定、版本和重试。纯问答不生成空进展记录。
+Agent 新上下文先用 `agent sessions --cwd …` 发现已有任务；继续任务用 `agent resume --session …`，独立新任务才创建会话。恢复默认只返回操作摘要，完整提案按 checkpoint 取得。Agent 开始新任务时运行 `agent begin --cwd … --task …`，之后每个有意义的阶段提交一次 `agent checkpoint`，收到回执后立即向用户汇报记录编号、验证范围和文件数。程序处理项目、任务绑定、版本和重试。纯问答不生成空进展记录。
 
 用户打开阅读器查看“最新进展”，筛选项目或未读，选择阶段查看完整正文和本次附件。新记录自动进入列表，当前详情保持不动。打开一条记录只确认该条已读，不清空其他项目的未读。
 

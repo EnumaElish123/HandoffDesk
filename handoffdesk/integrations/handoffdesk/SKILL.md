@@ -12,13 +12,30 @@ below already selects this machine's state directory:
 @HANDOFFDESK_COMMAND@
 ```
 
-Use `agent begin --cwd <absolute-project-directory> --task <task-title>
---actor Codex` for substantive project work. Add `--turn <turn_ref>` when the
-host supplied it. Use the returned `turn_ref` for reports and conclusion even in
-Skill-only mode; those local IDs are not invented host identities. Keep the
-returned session and checkpoint token for this task;
-`agent status` and `agent resume` recover them after interruption. The program
-chooses stable project/workline identities and revisions.
+When entering a project without the prior session reference, run
+`agent sessions --cwd <absolute-project-directory>` to discover existing tasks.
+Continue the task matching the user's request with `agent resume --session
+<session_ref> --cwd <absolute-project-directory>`. Multiple candidates require
+choosing the intended task; a shared title alone does not establish identity.
+For distinct work, run `agent begin --cwd <absolute-project-directory> --task
+<task-title> --actor Codex`; use `--new` when deliberately creating a separate
+same-named task. A different checkout remains a different working directory.
+
+Add `--turn <turn_ref>` when the host supplies a compatible open turn. Keep the
+returned session, checkpoint token and current turn reference. A continued
+completed task gets a new turn; interrupted work keeps its recovery chain.
+Use `--resume-recording` only after the user has explicitly resumed recording.
+When a supplied host turn belongs to a different host session, recover the old
+session's pending proposals/reports first. Then use `begin --new --workline
+<task_id> --cwd <same-directory> --task <task-title> --turn <current-host-turn>`
+to continue that workline in a new session without reassigning old receipts.
+The program chooses stable project/workline identities and revisions.
+
+Default `status` and `resume` responses contain compact summaries. Retrieve a
+failed proposal or full receipt with `agent status --session <session_ref>
+--checkpoint <token>` before retrying or reporting. Use `--full` and `--cursor`
+for older checkpoint pages; use `--pending-cursor` to follow remaining report
+pages. Counts and next cursors indicate more work, not successful completion.
 
 At a meaningful milestone, submit `agent checkpoint --session <session_ref>
 --checkpoint <token> --stdin` with JSON:

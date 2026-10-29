@@ -99,7 +99,7 @@ class BootstrapTests(unittest.TestCase):
                 self.assertEqual(config.read_bytes(), before)
 
     def test_missing_configuration_has_actionable_message(self):
-        code, _, errors = self.cli('list')
+        code, _, errors = self.cli('show', 'sample')
         self.assertEqual(code, 2)
         self.assertIn('handoffdesk init', errors)
         self.assertFalse(self.app.exists())

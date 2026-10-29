@@ -21,3 +21,7 @@ Development and packaging tools such as setuptools and GitHub Actions are
 external tools, not part of the application source. Their own licenses apply.
 If a future release bundles a runtime, its distributor must also include the
 licenses and notices required by that runtime and all bundled libraries.
+
+## Time zone data
+
+`tzdata` supplies IANA time zone data when the operating system has none. It is distributed under Apache-2.0; the underlying IANA database is public domain. Source packages resolve the declared dependency; portable builds include its data and license files. See [Python zoneinfo](https://docs.python.org/3/library/zoneinfo.html#data-sources) and [tzdata](https://pypi.org/project/tzdata/).

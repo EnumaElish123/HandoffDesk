@@ -14,12 +14,20 @@ def register(subparsers):
     commands = parser.add_subparsers(dest='agent_command', required=True)
     begin = commands.add_parser('begin', help='开始或恢复固定项目/任务绑定')
     begin.add_argument('--cwd', type=Path, default=Path.cwd())
-    begin.add_argument('--task', required=True)
+    begin.add_argument('--task', help='新任务的可读名称；继续已有会话时可省略')
     begin.add_argument('--actor', default='Agent')
     begin.add_argument('--host', default='unknown')
     begin.add_argument('--host-session-id')
     begin.add_argument('--turn', dest='turn_ref')
     begin.add_argument('--workline')
+    choice = begin.add_mutually_exclusive_group()
+    choice.add_argument('--new', action='store_true', help='明确新建独立任务，允许同名')
+    choice.add_argument('--resume', dest='resume_session', help='明确继续已有会话')
+    begin.add_argument('--resume-recording', action='store_true', help='用户明确要求后恢复暂停记录')
+    sessions = commands.add_parser('sessions', help='按工作目录发现已有任务，不登记新项目')
+    sessions.add_argument('--cwd', type=Path, default=Path.cwd())
+    sessions.add_argument('--limit', type=int, default=20)
+    sessions.add_argument('--cursor', type=int)
     checkpoint = commands.add_parser('checkpoint', help='保存语义内容，返回稳定回执和下一令牌')
     checkpoint.add_argument('--session', required=True)
     checkpoint.add_argument('--checkpoint', required=True)
@@ -29,12 +37,19 @@ def register(subparsers):
     source.add_argument('--file', type=Path)
     status = commands.add_parser('status', help='读取保存状态、原提案与待汇报回执')
     status.add_argument('--session', required=True)
-    status.add_argument('--checkpoint')
+    status.add_argument('--checkpoint', help='读取这一条的完整原提案和回执')
+    status.add_argument('--full', action='store_true', help='读取完整内容；默认仅输出操作摘要')
+    status.add_argument('--limit', type=int, default=10)
+    status.add_argument('--cursor', type=int)
+    status.add_argument('--pending-cursor', type=int, help='待汇报回执分页游标')
     resume = commands.add_parser('resume', help='恢复原任务；明确解决失败或冲突后可替换令牌')
     resume.add_argument('--session', required=True)
     resume.add_argument('--replace-checkpoint')
     resume.add_argument('--reason', default='')
     resume.add_argument('--turn', dest='turn_ref')
+    resume.add_argument('--cwd', type=Path, help='核对当前目录，拒绝跨目录静默续接')
+    resume.add_argument('--resume-recording', action='store_true', help='用户明确要求后恢复暂停记录')
+    resume.add_argument('--full', action='store_true', help='完整诊断；默认只返回操作摘要')
     observe = commands.add_parser('observe', help='观察宿主轮次，不创建项目')
     observe.add_argument('--host', default='unknown')
     observe.add_argument('--host-session-id')
@@ -67,14 +82,19 @@ def run(args, stream=None):
     command = args.agent_command
     if command == 'begin':
         return api.begin(args.cwd, args.task, args.actor, args.host, args.host_session_id,
-                         args.turn_ref, args.workline)
+                         args.turn_ref, args.workline, new=args.new,
+                         resume_session=args.resume_session, resume_recording=args.resume_recording, full=False)
+    if command == 'sessions':
+        return api.sessions(args.cwd, limit=args.limit, cursor=args.cursor)
     if command == 'checkpoint':
         return api.checkpoint(args.session, args.checkpoint,
                               read_payload(args.file, stream or sys.stdin), args.turn_ref)
     if command == 'status':
-        return api.status(args.session, args.checkpoint)
+        return api.status(args.session, args.checkpoint, full=args.full, limit=args.limit,
+                          cursor=args.cursor, pending_cursor=args.pending_cursor)
     if command == 'resume':
-        return api.resume(args.session, args.replace_checkpoint, args.reason, args.turn_ref)
+        return api.resume(args.session, args.replace_checkpoint, args.reason, args.turn_ref,
+                          resume_recording=args.resume_recording, cwd=args.cwd, full=args.full)
     if command == 'observe':
         return api.observe_turn(args.host, args.host_session_id, args.host_turn_id, args.resume_of)
     if command == 'turn-status':

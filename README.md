@@ -91,3 +91,11 @@ Tests use isolated temporary projects. See [CONTRIBUTING.md](CONTRIBUTING.md) fo
 ## License
 
 [MIT](LICENSE). Runtime dependencies and asset notices are documented in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+## Linux workflow improvements
+
+For a single source installation and Codex connection, run `python scripts/install.py`. Reinstalls reuse registered state. The installer prints an immediately usable absolute launch command and manages its own user command entry without replacing unrelated commands. Use `--no-connect` for reader-only installation and `handoffdesk doctor --human --probe` for readable diagnostics.
+
+The terminal reader supports task selection (`t`), search (`/`), unread filtering (`u`), full-screen attachment reading (`f`), exclusive Markdown export (`e`), connection status (`c`), and copying a task continuation prompt (`y`). Press `?` for help. Times include an explicit offset; `HANDOFFDESK_TIMEZONE=Asia/Shanghai` optionally selects a display zone.
+
+Agents can discover prior tasks with `agent sessions --cwd ...`, continue them with `agent resume --session ...`, and retrieve full proposals with `agent status --session ... --checkpoint ...`. Default recovery output is compact. Paused recording requires explicit user resumption before using `--resume-recording`; save, report, and reader acknowledgement remain separate states.

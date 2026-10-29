@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 
 
-def app_directory(explicit=None):
+def app_directory(explicit=None, *, registry_path=None):
     """An explicit home wins over the environment and platform defaults."""
     value = explicit if explicit is not None else os.environ.get('HANDOFFDESK_HOME')
     if value is not None:
@@ -13,7 +13,7 @@ def app_directory(explicit=None):
             raise ValueError('HandoffDesk 状态目录必须是本机绝对路径（--app-dir / HANDOFFDESK_HOME）。')
         return path.resolve()
     from .integration import registered_app_directory
-    registered = registered_app_directory()
+    registered = registered_app_directory(registry_path)
     if registered is not None:
         return registered
     if sys.platform == 'win32':

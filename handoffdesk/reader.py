@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import stat
 import unicodedata
 
@@ -17,6 +19,25 @@ def safe_text(value):
     """Render controls literally, including bidi/terminal escape sequences."""
     return ''.join(char if char in '\n\t' or not unicodedata.category(char).startswith('C')
                    else f'\\u{ord(char):04x}' for char in str(value))
+
+
+def format_recorded_at(value, zone=None):
+    """Display an absolute instant locally, always retaining a UTC offset."""
+    requested = zone or os.environ.get('HANDOFFDESK_TIMEZONE')
+    try:
+        target = timezone.utc if requested == 'UTC' else (ZoneInfo(requested) if requested else None)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ValueError('无法识别显示时区，请使用如 Asia/Shanghai 或 UTC 的时区名称。') from exc
+    try:
+        instant = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+    except (ValueError, TypeError):
+        return safe_text(value)
+    if instant.tzinfo is None:
+        instant = instant.replace(tzinfo=timezone.utc)
+    local = instant.astimezone(target)
+    offset = local.strftime('%z')
+    offset = offset[:3] + ':' + offset[3:]
+    return local.strftime('%Y-%m-%d %H:%M') + f' {local.tzname()} (UTC{offset})'
 
 
 class ReaderModel:
@@ -51,6 +72,9 @@ class ReaderModel:
             raise ValueError('记录的任务编号无效。')
         # Removing a configured task label must not make its immutable history unreadable.
         return project, project if line == 'default' else project + '\x1f' + line
+
+    def registered_projects(self):
+        return self._service().list_projects()
 
     def projects(self):
         service = self._service()
@@ -89,7 +113,7 @@ class ReaderModel:
         if project:
             project = service.registry.get(project)['id']
             if workline:
-                _, scope, _ = service._scope(project, workline)
+                _, scope = self._record_scope(service, project, workline)
                 conditions.append('h.project_id=?')
                 params.append(scope)
             else:
@@ -105,9 +129,7 @@ class ReaderModel:
         if unread_only:
             conditions.append('r.record_id IS NULL')
         if query.strip():
-            escaped = query.strip().replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
-            conditions.append("h.payload LIKE ? ESCAPE '\\'")
-            params.append('%' + escaped + '%')
+            conditions.append('visible_match(h.project_id,h.revision,h.payload,s.payload)=1')
         # Registration removal must not leak stale project entries into the feed.
         placeholders = ','.join('?' for _ in known)
         conditions.append(f"CASE WHEN instr(h.project_id,char(31))=0 THEN h.project_id ELSE substr(h.project_id,1,instr(h.project_id,char(31))-1) END IN ({placeholders})")
@@ -116,8 +138,44 @@ class ReaderModel:
             LEFT JOIN reader_reads r ON r.reader_id='local' AND
             r.record_id=replace(h.project_id, char(31), ':') ||
                 CASE WHEN instr(h.project_id,char(31))=0 THEN ':default' ELSE '' END || ':' || h.revision
+            LEFT JOIN snapshots s ON s.id=json_extract(h.payload,'$.source_snapshot_id') AND s.project_id=h.project_id
             WHERE """ + ' AND '.join(conditions) + ' ORDER BY h.rowid DESC LIMIT ?'
         with service.store.connection() as db:
+            if query.strip():
+                needle = query.strip().casefold()
+                names = {pid: {line['id']: line['name'] for line in service.list_worklines(pid)}
+                         for pid in known}
+                overlays = {(row['project_id'], row['node_id']): json.loads(row['payload'])
+                            for row in db.execute('SELECT * FROM node_file_state')}
+                snapshots = {}
+
+                def visible_match(scope, revision, raw, snapshot_raw):
+                    identity = service.store.scope_identity(scope)
+                    pid, line = identity['project_id'], identity.get('workline_id', 'default')
+                    if pid not in known:
+                        return False
+                    payload = json.loads(raw)
+                    fields = [known[pid]['name'], names[pid].get(line, '历史任务'),
+                              payload.get('current_task', ''), payload.get('last_done', ''),
+                              payload.get('next_action', ''), *payload.get('blockers', [])]
+                    verification = payload.get('verification') or {}
+                    fields.extend([verification.get('summary', ''), (payload.get('actor') or {}).get('name', '')])
+                    if any(needle in str(field).casefold() for field in fields):
+                        return True
+                    base = payload.get('file_manifest')
+                    if base is None:
+                        key = (scope, payload.get('source_snapshot_id'))
+                        if key not in snapshots:
+                            snapshot = json.loads(snapshot_raw) if snapshot_raw else None
+                            snapshots[key] = service.node_files._snapshot_files(pid, snapshot)
+                        base = snapshots[key]
+                    files = merge_files(base, overlays.get((pid, f'record:{line}:{revision}'), {}))
+                    for item in files:
+                        path = PureWindowsPath(item['path']) if PureWindowsPath(item['path']).is_absolute() else Path(item['path'])
+                        fields.extend([path.name, item.get('purpose', '')])
+                    return any(needle in str(field).casefold() for field in fields)
+
+                db.create_function('visible_match', 4, visible_match)
             rows = db.execute(sql, [*params, limit + 1]).fetchall()
         items = [self._record(service, row, include_files=False) for row in rows[:limit]]
         return {'items': items, 'next_cursor': rows[limit - 1]['position'] if len(rows) > limit else None}
@@ -127,7 +185,7 @@ class ReaderModel:
         payload = json.loads(row['payload'])
         identity = service.store.scope_identity(row['project_id'])
         project, line_id = identity['project_id'], identity.get('workline_id', 'default')
-        line = next((v for v in service.list_worklines(project) if v['id'] == line_id), {'name': line_id})
+        line = next((v for v in service.list_worklines(project) if v['id'] == line_id), {'name': '历史任务'})
         node_id = f"record:{line_id}:{row['revision']}"
         files = []
         if include_files:
@@ -230,11 +288,26 @@ class ReaderModel:
                                       'reveal' if action == 'folder' else action)
         return {'path': path, 'action': action, 'requested': True}
 
+    def export_file(self, record_id, path):
+        """Write a user-selected Markdown destination without replacing any file."""
+        text = self.export(record_id)
+        target = Path(path).expanduser().absolute()
+        if not target.name or not target.parent.is_dir():
+            raise ValueError('导出目录不存在，请选择已有目录。')
+        try:
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError as exc:
+            raise ValueError('目标已存在，请选择其他文件名；已有文件未被覆盖。') from exc
+        with os.fdopen(fd, 'w', encoding='utf-8', newline='\n') as stream:
+            stream.write(text)
+        return {'path': str(target), 'record_id': record_id}
+
     def export(self, record_id):
         value = self.detail(record_id)
         verification = value['verification']
         result = [f"# {value['title']}", '', f"项目：{value['project_name']} / {value['workline_name']}",
-                  f"记录：{value['id']} · {value['recorded_at']}", f"作者：{value['actor'].get('name', '历史记录')}",
+                  f"记录：{value['id']} · {format_recorded_at(value['recorded_at'])}",
+                  f"原始时间：{value['recorded_at']}", f"作者：{value['actor'].get('name', '历史记录')}",
                   f"类型：{'计划' if value['kind'] == 'plan' else '进展'}", '', '## 实际完成', value['done'] or '无完成项（计划）',
                   '', '## 下一步', value['next_action'], '', '## 验证',
                   f"{verification['status']}：{verification['summary']}", '', '## 阻碍',

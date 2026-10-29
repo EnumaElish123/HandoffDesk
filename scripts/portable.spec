@@ -6,14 +6,14 @@ import sysconfig
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 root = Path(SPECPATH).parent
-datas = collect_data_files('handoffdesk')
+datas = collect_data_files('handoffdesk') + collect_data_files('tzdata')
 datas += [(str(root / 'LICENSE'), 'licenses'), (str(root / 'THIRD_PARTY_NOTICES.md'), 'licenses')]
 python_license = Path(sysconfig.get_path('stdlib')) / 'LICENSE.txt'
 if python_license.is_file():
     datas.append((str(python_license), 'licenses/python'))
 for package in ('textual', 'rich', 'markdown-it-py', 'mdit-py-plugins', 'mdurl', 'pygments',
                 'platformdirs', 'typing-extensions', 'pywebview', 'proxy-tools', 'pythonnet',
-                'clr-loader', 'cffi', 'pycparser', 'bottle', 'PyInstaller'):
+                'clr-loader', 'tzdata', 'cffi', 'pycparser', 'bottle', 'PyInstaller'):
     try:
         metadata = distribution(package)
     except PackageNotFoundError:
@@ -23,7 +23,7 @@ for package in ('textual', 'rich', 'markdown-it-py', 'mdit-py-plugins', 'mdurl',
             source = metadata.locate_file(file)
             if source.is_file():
                 datas.append((str(source), 'licenses/' + package + '/' + str(file.parent)))
-hidden = collect_submodules('handoffdesk')
+hidden = collect_submodules('handoffdesk') + collect_submodules('tzdata')
 excludes = []
 if sys.platform == 'win32':
     hidden += collect_submodules('webview')

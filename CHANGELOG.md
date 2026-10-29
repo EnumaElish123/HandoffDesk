@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — Linux workflow improvements
+
+- Preserve registered state directories on source reinstall, provide owned user command launchers, and report actionable connection diagnostics.
+- Discover tasks by working directory; continue completed sessions in a new turn, explicitly resume paused recording, and keep recovery responses compact with full detail available on demand.
+- Search visible project, task, milestone and attachment content; show tasks and explicit time zones in the terminal reader.
+- Keep history selection stable during updates, show active filter results on narrow terminals, and provide first-use guidance and connection status.
+- Give attachments a readable full-screen view on small terminals; export the current milestone without overwriting existing files.
+- Align Linux documentation with the install → connect → agent record → user read workflow.
+
 ## 0.10.0 — Agent-first readers (development)
 
 - Replace the default Windows reading surface with a local HTML/CSS/JavaScript desktop hosted by pywebview; retain Tk as `legacy-desktop`.

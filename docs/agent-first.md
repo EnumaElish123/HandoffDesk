@@ -6,7 +6,7 @@ Windows 使用本地 Web 桌面阅读，Linux 使用终端阅读。两端复用�
 
 ```sh
 handoffdesk connect codex
-handoffdesk doctor --probe
+handoffdesk doctor --human --probe
 ```
 
 安装器只管理自己的 Skill 文件和 `hooks.json` 中对应的事件组，保留已有设置和 `AGENTS.md`。初次接入及 hook 定义改变后，Codex 要求在宿主内信任定义；使用 `/hooks` 查看。安装程序不会绕过这一步。新对话加载用户级 Skill；Skill 自动匹配并非逐轮保证。
@@ -24,6 +24,12 @@ handoffdesk doctor --probe
 ## 从源码安装
 
 开发者可在 Python 3.10+ 环境运行 `python scripts/install.py`；这会建立独立用户环境、安装当前源码及平台阅读依赖，并连接 Codex。`--check` 仅显示目标，不写入或下载。`--prefix` 指定程序目录，`--state-dir` 指定已有状态目录，二者须分离。`--no-connect` 只登记安装。`--codex-home`、`--skills-home` 可用于隔离验证；普通用户无需填写。
+
+Linux 安装器会创建本安装拥有的 `~/.local/bin/handoffdesk` 入口；已有外部同名文件或用户修改会保留。改变程序安装目录时，仅在旧安装登记、入口清单和内容摘要共同证明所有权后转交入口；旧安装的移除操作不会删除新入口。无论 PATH 是否配置，安装结尾都给出可直接复制的绝对启动命令。`--remove-launcher` 只移除该安装未被修改的命令入口，不删程序或记录。
+
+更新时，记录目录解析与阅读器一致：显式 `--state-dir` > `HANDOFFDESK_HOME` > 已有安装登记 > 平台默认。普通重装沿用已有记录；登记损坏会停止，不会切换到新的空目录。`--registry-path` 可为隔离验证选择登记文件。
+
+`doctor --human` 提供中文分层状态和针对当前阻塞的下一步；默认 JSON 接口保留，新增 `issues`、`next_action` 与 `layers` 便于 Agent 和阅读器消费。没有 CLI 入口只说明当前进程无法检测它，不代表桌面宿主不存在；Skill-only 的状态也会单独说明。
 
 这个源码脚本需要已有 Python。面向无需配置 Python 的用户，应发布下面的便携包；不能把源码安装说成免运行环境安装。
 

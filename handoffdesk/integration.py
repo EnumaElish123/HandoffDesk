@@ -117,6 +117,7 @@ def register_installation(app_dir, registry_path=None):
     app = _absolute(app_dir, '状态目录')
     registry = Path(registry_path) if registry_path is not None else installation_registry_path()
     with _lock(registry.parent):
+        registered_app_directory(registry)  # Validate before publishing any replacement.
         previous = _load(registry, {})
         metadata = app / 'integrations' / 'state.json'
         state = _load(metadata, {})
@@ -336,8 +337,36 @@ def permission_probe(app_dir):
 def doctor(app_dir, *, codex_home=None, skills_home=None, probe=False):
     from .paths import app_directory
     app = app_directory(app_dir)
-    codex, skills = _locations(codex_home, skills_home)
-    manifest = _load(_manifest_path(app), {})
+    issues = []
+
+    def issue(code, message, next_action, severity='error'):
+        issues.append(dict(code=code, message=message, next_action=next_action, severity=severity))
+
+    def load_checked(path):
+        try:
+            return _load(path, {})
+        except (ValueError, OSError) as exc:
+            issue('configuration_unreadable', str(exc), '保留原配置，修复该文件后重新运行 doctor。')
+            return {}
+
+    manifest = load_checked(_manifest_path(app))
+    codex, skills = _locations(codex_home or manifest.get('codex_home'), skills_home or manifest.get('skills_home'))
+    command = shell_command(_prefix(app), windows=sys.platform == 'win32')
+    connect_action = command + ' connect codex'
+    reader_status = 'available'
+    try:
+        from .registry import Registry
+        if (app / 'config' / 'projects.json').exists():
+            Registry(app / 'config' / 'projects.json')
+        db_path = app / 'data' / 'cards.sqlite3'
+        if db_path.exists():
+            with sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True) as db:
+                db.execute('SELECT count(*) FROM handoffs').fetchone()
+    except (ValueError, OSError, sqlite3.Error) as exc:
+        reader_status = 'unavailable'
+        issue('reader_unavailable', '当前记录无法读取：' + str(exc), '检查此状态目录的配置、数据库和读取权限；保留原文件后恢复备份。')
+    if not manifest:
+        issue('not_connected', '尚未为此状态目录连接 Codex。', connect_action)
     executable = shutil.which('codex')
     host = {'executable': executable, 'status': 'executable_unavailable'}
     if executable:
@@ -346,29 +375,92 @@ def doctor(app_dir, *, codex_home=None, skills_home=None, probe=False):
             if completed.returncode == 0:
                 host.update(status='available', version=completed.stdout.strip()[:200])
                 features = subprocess.run([executable, 'features', 'list'], capture_output=True, text=True, timeout=5)
-                hooks_feature = re.search(r'^hooks\s+\S+\s+(true|false)\s*$', features.stdout, re.MULTILINE)
-                host['hooks_feature'] = hooks_feature.group(1) == 'true' if hooks_feature else 'unknown'
+                match = re.search(r'^hooks\s+\S+\s+(true|false)\s*$', features.stdout, re.MULTILINE)
+                host['hooks_feature'] = match.group(1) == 'true' if features.returncode == 0 and match else 'unknown'
             else:
-                host['message'] = 'Codex 启动命令未成功运行。'
+                host.update(status='executable_failed', message='Codex 启动命令未成功运行。')
         except (OSError, subprocess.TimeoutExpired) as exc:
-            host['message'] = str(exc)
+            host.update(status='executable_failed', message=str(exc))
+    if host['status'] == 'executable_unavailable':
+        issue('host_executable_unavailable', '当前 PATH 中检测不到 Codex CLI；这不能证明桌面宿主未安装。',
+              '在使用 Codex 的同一终端确认 codex --version；桌面应用用户请在实际任务中让 Agent 运行 doctor --probe。阅读器可独立使用。')
+    elif host['status'] != 'available':
+        issue('host_executable_failed', '已找到 Codex 入口，但启动失败：' + str(executable),
+              '运行 ' + shell_command([executable, '--version'], windows=sys.platform == 'win32') + ' 检查并修复入口，再运行 doctor。')
     checks = []
     for name, digest in manifest.get('files', {}).items():
         file = Path(name)
-        checks.append({'path': name, 'ok': file.is_file() and _digest(file.read_bytes()) == digest})
-    hook_document = _load(codex / 'hooks.json', {})
-    hooks_intact = all(group in hook_document.get('hooks', {}).get(event, []) for event, group in manifest.get('hooks', {}).items())
-    invocation = _load(app / 'integrations' / 'last-hook.json', {})
+        try:
+            valid = file.is_file() and _digest(file.read_bytes()) == digest
+        except OSError:
+            valid = False
+        checks.append({'path': name, 'ok': valid})
+    if manifest and (not checks or not all(item['ok'] for item in checks)):
+        issue('managed_files_changed', '接入文件缺失或已被修改。', '保留用户修改，核对 Skill 文件后再连接；安装器不会覆盖修改过的文件。')
+    locations_match = (not manifest or (str(codex) == manifest.get('codex_home') and str(skills) == manifest.get('skills_home')))
+    if not locations_match:
+        issue('integration_location_mismatch', '本次检查目录与已登记的接入目录不同。', '省略目录参数以检查现有接入，或先明确断开再连接到新目录。')
+    hook_document = load_checked(codex / 'hooks.json')
+    hook_values = hook_document.get('hooks', {})
+    if not isinstance(hook_values, dict):
+        issue('hooks_invalid', 'hooks 配置结构无效。', '修复 hooks.json 的 hooks 对象后重新检查。')
+        hook_values = {}
+    hooks_intact = all(isinstance(hook_values.get(event), list) and group in hook_values[event]
+                       for event, group in manifest.get('hooks', {}).items())
+    hooks_requested = bool(manifest.get('hooks'))
+    if hooks_requested and not hooks_intact:
+        issue('hooks_changed', 'HandoffDesk 的 hooks 定义缺失或已被修改。', '核对 hooks.json 并保留其他接入内容；重新运行 connect codex 后按宿主提示信任。')
+    if manifest and not hooks_requested:
+        issue('skill_only', '当前为 Skill-only 接入，记录取决于 Agent 调用，没有结束时的 hook 补救。',
+              '开启新的 Codex 对话加载 Skill，并完成一次实际任务；需要 hooks 时运行 connect codex。', 'info')
+    if hooks_requested and host.get('hooks_feature') is False:
+        issue('hooks_disabled', '此 Codex CLI 的 hooks 功能未启用。',
+              '在 Codex 中检查 hooks 设置；宿主不支持时可改用 connect codex --skill-only。')
+    elif hooks_requested and host['status'] == 'available' and host.get('hooks_feature') == 'unknown':
+        issue('hooks_support_unknown', '无法从当前 CLI 确认 hooks 功能支持。',
+              '在实际 Codex 中检查 /hooks；不支持时使用 connect codex --skill-only。', 'warning')
+    if hooks_requested:
+        issue('host_trust_unverified', '首次 hook 信任和真实宿主调用尚未验证。',
+              '在 Codex 中查看 /hooks 并完成信任；让实际任务保存一次记录并核对汇报。', 'warning')
+    invocation = load_checked(app / 'integrations' / 'last-hook.json')
     probe_result = permission_probe(app) if probe else {'status': 'not_run'}
-    checked_ok = bool(manifest) and all(item['ok'] for item in checks) and hooks_intact
-    checked_ok = checked_ok and host['status'] == 'available' and host.get('hooks_feature') is not False
-    checked_ok = checked_ok and (not probe or probe_result['ok'])
+    if probe and not probe_result['ok']:
+        issue('permission_denied', '当前进程无法写入状态目录：' + probe_result['message'],
+              '为实际 Agent 进程授予此状态目录的文件与 SQLite 写权限，再运行 doctor --probe。')
+    elif not probe:
+        issue('permissions_not_checked', '尚未检查实际调用进程的写权限。', command + ' doctor --probe', 'info')
+    issues.sort(key=lambda item: {'error': 0, 'warning': 1, 'info': 2}[item['severity']])
+    checked_ok = bool(manifest) and not any(item['severity'] == 'error' for item in issues)
+    layers = [
+        {'id': 'reader', 'label': '阅读', 'status': reader_status, 'message': '阅读无需 Codex 或 hooks 就绪。'},
+        {'id': 'skill', 'label': 'Skill 文件', 'status': 'installed' if manifest and checks and all(x['ok'] for x in checks) else 'not_ready', 'message': str(skills / 'handoffdesk')},
+        {'id': 'host', 'label': 'Codex CLI', 'status': host['status'], 'message': host.get('message', host.get('version', '未检测到命令入口'))},
+        {'id': 'hooks', 'label': 'Hooks', 'status': 'configured' if hooks_requested and hooks_intact else 'skill_only' if manifest else 'not_connected', 'message': '定义存在与实际执行是不同状态。'},
+        {'id': 'trust', 'label': '宿主信任', 'status': 'not_verified', 'message': '手动探针与 handler 日志不证明宿主已信任。'},
+        {'id': 'permissions', 'label': '写权限', 'status': 'passed' if probe_result.get('ok') else 'failed' if probe else 'not_run', 'message': probe_result.get('message', '请在实际 Agent 进程检查。')},
+    ]
     return {'ok': checked_ok, 'fully_verified': False,
             'app_dir': str(app), 'version': __version__, 'host': host,
-            'connected': bool(manifest), 'files': checks, 'hooks_configured': bool(manifest.get('hooks')) and hooks_intact,
+            'connected': bool(manifest), 'files': checks, 'hooks_configured': hooks_requested and hooks_intact,
             'host_trust': 'not_verified', 'last_handler_invocation': invocation,
-            'permission_probe': probe_result,
-            'message': 'doctor 的写入探针只证明调用它的进程权限；请让 Codex 在实际任务中运行 doctor --probe。首次 hook 信任由宿主完成。'}
+            'permission_probe': probe_result, 'layers': layers, 'issues': issues,
+            'next_action': issues[0]['next_action'] if issues else '完成一次真实任务并核对记录与汇报。',
+            'message': issues[0]['message'] if issues else '本机检查通过；真实宿主信任和自动调用仍需实际任务验证。'}
+
+
+def format_doctor(value):
+    """Human-readable rendering shared by the CLI and terminal reader."""
+    labels = {'available': '可用', 'unavailable': '不可用', 'installed': '已安装', 'not_ready': '未就绪',
+              'executable_unavailable': '未检测到入口', 'executable_failed': '启动失败', 'configured': '已配置',
+              'skill_only': '仅 Skill', 'not_connected': '未接入', 'not_verified': '尚未验证',
+              'passed': '通过（仅当前进程）', 'failed': '失败', 'not_run': '尚未检查'}
+    lines = ['HandoffDesk 接入与状态', value['message'], '']
+    lines.extend(f"{layer['label']}：{labels.get(layer['status'], layer['status'])}。{layer['message']}" for layer in value.get('layers', []))
+    lines.extend(['', '下一步：' + value['next_action']])
+    for item in value.get('issues', [])[1:]:
+        lines.extend(['', item['message'], '操作：' + item['next_action']])
+    lines.extend(['', '记录目录：' + value['app_dir'], '以上不代表用户已收到或已阅读任何记录。'])
+    return '\n'.join(lines)
 
 
 def _text_context(event, text):

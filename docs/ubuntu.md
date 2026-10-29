@@ -1,123 +1,88 @@
-# Ubuntu 桌面与服务器
+# Linux 终端使用
 
-HandoffDesk 0.10 的 Linux 默认阅读方式是 TUI。源码开发使用 Python 3.10+ 和 `pip install '.[tui]'`，随后运行 `handoffdesk tui`；Agent 记录命令不依赖 Textual、Tk 或图形显示。用户级安装与便携包见 [安装说明](agent-first.md)。下面保留的 Tk 和桌面依赖只适用于显式 `legacy-desktop` 兼容入口。
+Linux 的默认入口是 TUI，不需要 Tk、X11 或浏览器。日常流程是：安装一次、连接 Agent、让 Agent 完成工作并记录，然后打开阅读器。项目由 Agent 根据工作目录登记，首次使用无需 `init` 或编辑配置。
 
-## 选择运行方式
+## 安装与首次使用
 
-| 环境 | 可以做什么 | 需要准备 |
-| --- | --- | --- |
-| 无界面服务器 / SSH | 终端阅读、搜索、未读、附件预览；记录、查询、导出 | 安装 tui 组件；源码需 Python 3.10+，便携包自带运行时 |
-| 本地 Ubuntu 桌面 | 完整窗口、查看进度、打开文件、文件管理器定位 | 匹配的 Tk、字体、默认应用和桌面接口 |
-| Ubuntu 远程桌面 | 与本机桌面相同，操作远端机器的本机文件 | 已连接且可用的远程图形会话 |
-
-CLI 保存后直接退出，TUI 不启动 HTTP 服务。可选 `desktop --browser` 提供仅回环地址的本机 Web 预览，不负责 SSH 转发或跨机器同步。Windows 的默认入口是 Web 桌面窗口。
-
-## 安装系统依赖
-
-先检查当前 Python 版本：
+从源码安装需要 Python 3.10+；在源码根目录执行：
 
 ```sh
-python3 --version
+python3 scripts/install.py
 ```
 
-在提供 Python 3.10+ 的 Ubuntu 环境，可由操作者按需安装：
+脚本建立独立用户环境，安装终端组件并准备 Codex 接入文件。结束时会给出可直接复制的绝对启动命令，即使用户命令目录不在 PATH 中也能立即使用。Linux 默认程序目录为 `~/.local/lib/handoffdesk`，并尝试创建归本安装管理的 `~/.local/bin/handoffdesk`；遇到其他来源的同名命令或用户修改会保留它。改变程序目录时，只有能由旧登记、清单和内容摘要证明为本工具未修改入口的命令才会转交新安装。若入口已在 PATH 中：
 
 ```sh
-# CLI 与源码安装
-sudo apt install python3 python3-venv git
-
-# 需要桌面时
-sudo apt install python3-tk xdg-utils libglib2.0-bin fonts-noto-cjk
+handoffdesk tui
+handoffdesk doctor --human --probe
 ```
 
-应用不自动运行这些系统安装命令。Ubuntu 20.04 默认 Python 3.8，需单独准备 Python 3.10+；不要为本工具替换系统 Python。使用另一套解释器时，系统的 `python3-tk` 不一定能为它提供 Tk，应检查同一个解释器：
+按 Codex 提示确认首次 hooks 信任，再开启新对话。没有 hooks 支持时使用 `handoffdesk connect codex --skill-only`。普通用户不需要给每个项目重复安装或复制 Skill。安装时选择 `--no-connect` 则只安装阅读器，之后可运行 `handoffdesk connect codex`。
+
+如果只是开发当前源码，使用虚拟环境安装 `python -m pip install '.[tui]'`，随后执行 `handoffdesk connect codex`。便携版已包含运行时和 TUI 组件，解压后运行包内的 `./handoffdesk`；不要给便携版再安装 Python 组件。已验证的发行环境以对应构建验收记录为准。
+
+Ubuntu 20.04 的默认 Python 3.8 不满足源码要求；准备独立 Python 3.10+，或使用适配系统的便携包，不要替换系统 Python。程序不会修改 SSH 配置、shell 登录配置或安装系统软件。
+
+## 阅读和继续工作
+
+Agent 在实际完成阶段后保存记录，立即汇报记录编号、成果、验证范围和文件。用户从终端阅读这些内容：
+
+- `/` 搜索；项目/任务条件用于缩小结果；`u` 筛选未读。
+- 选择记录并按 Enter 阅读，Esc 返回列表；新记录更新时保留阅读位置。
+- `f` 阅读附件。路径指向运行 HandoffDesk 的机器；复制到本机剪贴板取决于终端支持。
+- `?` 查看当前快捷键。可从详情导出 Markdown，也可用下方 CLI。
+
+需要继续任务时，告诉 Agent 继续该项目中的具体工作。Agent 可先通过 `agent sessions --cwd /absolute/project` 发现既有任务，再明确恢复；用户无需搬运内部会话令牌。记录的附件是文件引用，正文以磁盘当前版本为准，不是文件备份。
+
+## 无交互终端和脚本调用
+
+TUI 需要交互式 TTY。自动任务、管道或非交互 SSH 使用无需界面的命令：
 
 ```sh
-/absolute/path/to/python3 -c 'import sys, tkinter; print(sys.version); print(tkinter.TkVersion)'
+handoffdesk feed
+handoffdesk feed --query '任务名称'
+handoffdesk read '实际记录编号' --markdown
 ```
 
-Tk 可导入仅证明模块存在；实际窗口仍依赖可连接的图形会话和字体。
+`feed` 首次运行可以返回空列表，不创建演示项目。`read --ack` 可明确将该条标为已读；普通查询不会把所有记录清为已读。Agent 的记录命令独立于终端组件，接口说明见 [低配置接入](agent-first.md)。
 
-## 从源码使用
+## 接入状态与排错
 
 ```sh
-git clone https://github.com/EnumaElish123/HandoffDesk.git
-cd HandoffDesk
-python3 -m handoffdesk init
-python3 -m handoffdesk list --json
+handoffdesk doctor --human --probe
 ```
 
-默认状态位于 `$XDG_DATA_HOME/handoffdesk`，未设置时为 `~/.local/share/handoffdesk`。如需指定自己的位置：
+中文诊断分别说明阅读、Skill 文件、CLI 检测、hooks、宿主信任及当前进程写权限，并给出针对当前问题的下一步。默认 `doctor` 仍返回 JSON，供 Agent 使用。
+
+找不到 `codex` 命令不等于没有桌面宿主；应在实际使用的 Codex 任务中运行探针。文件已配置不等于宿主已信任。手动 handler 调用和当前进程权限通过也不能证明自动触发成功。状态目录与 Agent/阅读器应在同一机器；默认不跨机器同步。
+
+## 更新与移除入口
+
+再次执行源码安装器会按显式 `--state-dir`、`HANDOFFDESK_HOME`、已有安装登记、平台默认的顺序定位记录。普通重装沿用已登记目录；登记损坏时会停止并指出文件，避免切到空目录。`--check` 仅检查目标，不安装或下载。`--prefix` 为程序目录，与记录目录分离。
+
+`handoffdesk disconnect codex` 只移除未被用户改动的 Skill 和本工具对应的 hooks，保留记录、备份及用户修改。
+
+需要移除本源码安装创建的用户命令入口时，可从源码运行：
 
 ```sh
-export HANDOFFDESK_HOME=/absolute/path/to/handoffdesk-state
-python3 -m handoffdesk init --project alpha --name 'My project' --root /absolute/path/to/your-project
+python3 scripts/install.py --remove-launcher
 ```
 
-`init` 不覆盖已有配置；已有状态增加项目使用 `project add`。设置状态目录时，应选择不位于已接入项目中的独立目录。
+自定义程序目录应同时提供同一个 `--prefix`。此操作只移除未修改的用户入口，不删除程序或记录；用户替换过的同名命令会保留。
 
-安装到虚拟环境后，可在其他工作目录调用：
+## 旧版兼容与手工管理
 
-```sh
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install .
-handoffdesk list --json
-```
+以下接口保留给已有工作流，首次自动接入无需执行：
 
-重新打开终端时激活相同环境，或使用该虚拟环境的绝对 `bin/handoffdesk` 路径。应用不会修改系统 Python、SSH 配置或登录配置。
+- `init`：显式创建配置；不带项目参数会创建通用示例。
+- `project add`：手工登记项目，适合不使用 Agent 自动登记的情况。
+- `record schema/context/validate/save`：兼容协议 1，见 [Agent 指南](agents.md)。
+- `legacy-desktop`：旧 Tk 窗口，依赖匹配的 Tk、字体及实际可连接的图形会话。Linux 默认 TUI 无这些要求。
 
-## 服务器 Agent 流程
+可选 `desktop --browser` 仅提供本机回环地址的 Web 预览，不自动建立 SSH 隧道或同步服务器文件。远端附件需要自行传输/挂载才能在其他机器打开。
 
-```sh
-handoffdesk record schema
-handoffdesk record context alpha --workline default
-handoffdesk record validate --file /absolute/path/to/submission.json
-handoffdesk record save --file /absolute/path/to/submission.json
-handoffdesk nodes alpha --workline default
-handoffdesk files alpha --node record:default:1
-```
+## 验收范围
 
-保存 JSON 与并发规则见 [Agent 指南](agents.md)。`node_id` 以实际回执为准。普通 SSH 会话没有图形显示时，记录与查询仍正常；尝试打开窗口会提示需要桌面。
+服务器可运行 `python tests/run_tests.py --headless`。发行前仍需在声明支持的目标系统和真实 SSH/tmux 中检查首次安装、升级保留历史、尺寸变化、退出恢复以及剪贴板支持/不支持情况；本机 PTY 通过不等于这些环境全部通过。
 
-服务器附件路径指向服务器本机文件。另一台电脑无法仅凭复制路径打开它们；可以在服务器的远程桌面中使用 HandoffDesk，或由自己的文件传输/挂载流程准备文件后重新定位。工具不自动同步数据库、传输文件或打开 SSH 隧道。
-
-## 桌面使用与文件打开
-
-在已登录的本地或远程桌面终端运行：
-
-```sh
-handoffdesk legacy-desktop
-```
-
-Tk 需要有效的 `DISPLAY`；Wayland 桌面通常由 XWayland 提供。不要把手工设置一个 `DISPLAY` 字符串当成图形连接已经建立，应在实际图形会话中启动。还需有当前用户可用的桌面总线和默认文件应用。
-
-普通文档使用默认程序；文件管理器支持 `org.freedesktop.FileManager1.ShowItems` 时选中目标，否则退回父目录。脚本使用内置只读文本查看器，模型与未知文件类型定位所在目录。中文、空格、逗号路径作为独立参数传递。
-
-如果中文显示异常，检查字体和 Tk 构建的字体支持；独立 Python 自带的 Tk 与发行版 Tk 不一定具有相同功能。桌面和 Agent 要使用同一状态与数据目录，才能共享进度和新记录提醒。
-
-## 在自己的环境验收
-
-```sh
-python3 tests/run_tests.py --headless
-# 有显示服务、Tk 的桌面：
-python3 tests/run_tests.py
-```
-
-无界面集合应能运行而不导入 Tk。桌面还应实际检查：
-
-1. Agent 保存一条真实试用阶段，窗口收到更新，进入“本次文件”。
-2. 关联含中文、空格或逗号的文件，确认完整路径、搜索、用途和复制路径。
-3. 打开文档、定位文件管理器、查看脚本文本；确认脚本未执行。
-4. 文件移动后重新定位，移除关联后原文件仍存在。
-5. 关闭再打开窗口，阶段及文件清单仍可查询。
-
-这些操作使用独立试用状态和临时文件，不写入正式个人数据。自动测试、真实 X11 应用交互和物理 GNOME/Wayland 验收是不同的证据；请根据本版本实际验收结果判断覆盖范围，不把模块可导入等同于完整桌面验收。
-
-## 依赖接口参考
-
-- [Ubuntu Python Tk package](https://packages.ubuntu.com/noble/python3-tk)
-- [xdg-open](https://portland.freedesktop.org/doc/xdg-open.html)
-- [File manager D-Bus interface](https://www.freedesktop.org/wiki/Specifications/file-manager-interface/)
-
-配置、备份和旧版迁移见 [configuration.md](configuration.md)。
+更多内容：[安装与 Agent 接入](agent-first.md)、[配置与迁移](configuration.md)、[隐私说明](privacy.md)。

@@ -430,7 +430,7 @@ class Store:
             db.execute('UPDATE reviews SET payload=? WHERE id=?', (encode(value),value['id']))
         return value
 
-    def commit_checkpoint(self, token, prepared, manifest_factory, response_factory):
+    def commit_checkpoint(self, token, prepared, manifest_factory, response_factory, *, turn_guard=None):
         """One transaction publishes record, receipt, next token and reader event."""
         with self.connection(True) as db:
             checkpoint = db.execute('SELECT * FROM agent_checkpoints WHERE token=?', (token,)).fetchone()
@@ -438,6 +438,8 @@ class Store:
                 raise ValueError('提交令牌不存在。')
             if checkpoint['receipt']:
                 return dict(json.loads(checkpoint['receipt']), replayed=True)
+            if turn_guard is not None:
+                turn_guard(db)
             if checkpoint['status'] == 'superseded':
                 raise ValueError('此令牌已被明确替换，请使用新的令牌。')
             if checkpoint['request'] is None or checkpoint['base_revision'] != prepared['expected_revision']:

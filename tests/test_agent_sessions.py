@@ -105,8 +105,8 @@ class AgentSessionTests(unittest.TestCase):
     def test_lost_success_response_is_recovered_without_another_record(self):
         bound = self.begin()
         original = Store.commit_checkpoint
-        def lost_response(store, *args):
-            original(store, *args)
+        def lost_response(store, *args, **kwargs):
+            original(store, *args, **kwargs)
             raise RuntimeError('transport interrupted after commit')
         with patch.object(Store, 'commit_checkpoint', lost_response):
             with self.assertRaises(RuntimeError):
@@ -238,6 +238,171 @@ class AgentSessionTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT payload FROM handoffs').fetchone()[0], raw)
             self.assertEqual(db.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
         self.assertEqual(len(list(backups[0].parent.glob('*-projects.json'))), 1)
+
+
+class AgentWorkflowOptimizationTests(unittest.TestCase):
+    setUp = AgentSessionTests.setUp
+    begin = AgentSessionTests.begin
+    payload = AgentSessionTests.payload
+    rows = AgentSessionTests.rows
+    def test_completed_resume_creates_fresh_turn_and_preserves_replay(self):
+        b = self.begin()
+        first = self.api.checkpoint(b['session_ref'], b['checkpoint_token'], self.payload())
+        self.api.ack_report(b['turn_ref'], first['record_id'], 'agent_acknowledged', 'fixture')
+        self.api.conclude_turn(b['turn_ref'], 'recorded', [first['record_id']])
+        with self.assertRaises(SessionError) as error:
+            self.api.checkpoint(b['session_ref'], first['next_checkpoint_token'], self.payload())
+        self.assertEqual(error.exception.code, 'turn_concluded')
+        replay = self.api.checkpoint(b['session_ref'], b['checkpoint_token'], self.payload())
+        self.assertTrue(replay['replayed'])
+        continued = self.api.resume(b['session_ref'])
+        self.assertNotEqual(continued['turn_ref'], b['turn_ref'])
+        self.assertTrue(continued['writable'])
+        second = self.api.checkpoint(b['session_ref'], continued['checkpoint_token'], self.payload(title='第二天进展'))
+        self.assertEqual(second['revision'], 2)
+        self.api.conclude_turn(continued['turn_ref'], 'recorded', [second['record_id']])
+        self.assertEqual(self.api.turn_status(b['turn_ref'])['receipt_ids'], [first['record_id']])
+
+    def test_paused_resume_and_begin_require_explicit_recording_intent(self):
+        b = self.begin(host='trial-host', host_session_id='fixture')
+        self.api.conclude_turn(b['turn_ref'], 'paused', reason='用户暂停')
+        for operation in (lambda: self.api.resume(b['session_ref']),
+                          lambda: self.begin(host='trial-host', host_session_id='fixture')):
+            with self.assertRaises(SessionError) as error:
+                operation()
+            self.assertEqual(error.exception.code, 'recording_paused')
+        self.assertFalse(self.api.status(b['session_ref'], full=False)['writable'])
+        resumed = self.api.resume(b['session_ref'], resume_recording=True)
+        saved = self.api.checkpoint(b['session_ref'], resumed['checkpoint_token'], self.payload())
+        self.api.conclude_turn(resumed['turn_ref'], 'recorded', [saved['record_id']])
+        self.assertNotEqual(b['turn_ref'], resumed['turn_ref'])
+
+    def test_host_begin_after_interrupt_preserves_recovery_budget(self):
+        b = self.begin(host='trial-host', host_session_id='fixture')
+        self.api.claim_remediation(b['turn_ref'])
+        self.api.conclude_turn(b['turn_ref'], 'interrupted', reason='fixture')
+        resumed = self.begin(host='trial-host', host_session_id='fixture')
+        self.assertEqual(b['session_ref'], resumed['session_ref'])
+        self.assertFalse(self.api.claim_remediation(resumed['turn_ref']))
+
+    def test_task_discovery_no_side_effects_duplicate_requires_choice(self):
+        self.assertEqual(self.api.sessions(self.project)['items'], [])
+        self.assertFalse(self.app.exists())
+        one = self.begin()
+        with self.assertRaises(SessionError) as error:
+            self.begin()
+        self.assertEqual(error.exception.code, 'task_exists')
+        two = self.begin(new=True)
+        found = self.api.sessions(self.project)
+        self.assertEqual({i['session_ref'] for i in found['items']}, {one['session_ref'], two['session_ref']})
+        self.assertEqual({i['task'] for i in found['items']}, {'完成阅读优化'})
+        resumed = self.api.begin(self.project, None, resume_session=one['session_ref'])
+        self.assertEqual(one['session_ref'], resumed['session_ref'])
+        self.assertEqual(len(self.rows('agent_sessions')), 2)
+        nested = self.project / 'nested'; nested.mkdir()
+        with self.assertRaises(SessionError):
+            self.api.resume(one['session_ref'], cwd=nested)
+        self.assertTrue(all(not item['same_directory'] for item in self.api.sessions(nested)['items']))
+
+    def test_explicit_new_host_task_is_discoverable_on_repeated_begin(self):
+        original = self.begin(new=True, host='trial-host', host_session_id='first')
+        with self.assertRaises(SessionError) as error:
+            self.begin(host='trial-host', host_session_id='first')
+        self.assertEqual(error.exception.code, 'task_exists')
+        self.assertEqual(error.exception.details['candidates'][0]['session_ref'], original['session_ref'])
+        self.assertEqual(len(self.rows('agent_sessions')), 1)
+
+    def test_new_host_session_can_explicitly_continue_existing_workline(self):
+        original = self.begin(host='trial-host', host_session_id='first')
+        first = self.api.checkpoint(original['session_ref'], original['checkpoint_token'], self.payload())
+        self.api.ack_report(original['turn_ref'], first['record_id'], 'agent_acknowledged', 'fixture')
+        self.api.conclude_turn(original['turn_ref'], 'recorded', [first['record_id']])
+        turn = self.api.observe_turn('trial-host', 'second', 'second-turn')
+        with self.assertRaises(SessionError) as conflict:
+            self.api.resume(original['session_ref'], turn_ref=turn['turn_ref'])
+        self.assertEqual(conflict.exception.details['next_action'], 'begin')
+        self.assertIn(original['workline'], conflict.exception.details['argv'])
+        found = self.api.sessions(self.project)['items'][0]
+        self.assertEqual(found['host_session_id'], 'first')
+        continued = self.begin(new=True, workline=found['task_id'], turn_ref=turn['turn_ref'])
+        saved = self.api.checkpoint(continued['session_ref'], continued['checkpoint_token'], self.payload())
+        self.assertEqual(saved['workline'], first['workline'])
+        self.assertEqual(saved['revision'], 2)
+        self.assertEqual(saved['record']['actor']['session_id'], 'second')
+        self.assertNotEqual(continued['session_ref'], original['session_ref'])
+        self.api.conclude_turn(continued['turn_ref'], 'recorded', [saved['record_id']])
+
+    def test_status_is_compact_and_complete_details_are_recoverable(self):
+        import sys
+        b = self.begin(); token = b['checkpoint_token']
+        payload = self.payload(actual_done='这是实际检查过的记录。' * 100, next_action='下一步核查。' * 50)
+        saved_tokens = []
+        for i in range(50):
+            saved_tokens.append(token)
+            receipt = self.api.checkpoint(b['session_ref'], token, payload)
+            token = receipt['next_checkpoint_token']
+            self.api.ack_report(b['turn_ref'], receipt['record_id'], 'agent_acknowledged', 'fixture')
+        command = [sys.executable, '-m', 'handoffdesk', '--app-dir', str(self.app), 'agent', 'status', '--session', b['session_ref']]
+        result = subprocess.run(command, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLess(len(result.stdout), 8192)
+        compact = json.loads(result.stdout)
+        self.assertEqual(compact['pending_reports_count'], 0)
+        self.assertIsNotNone(compact['next_cursor'])
+        detail = self.api.status(b['session_ref'], saved_tokens[0], full=False)
+        self.assertEqual(detail['checkpoints'][0]['request']['actual_done'], payload['actual_done'])
+        cursor = None; seen = []
+        while True:
+            page = self.api.status(b['session_ref'], full=True, limit=7, cursor=cursor)
+            seen.extend(i['token'] for i in page['checkpoints'])
+            cursor = page['next_cursor']
+            if cursor is None:
+                break
+        self.assertEqual(set(seen), set(saved_tokens + [token]))
+        self.assertEqual(len(seen), 51)
+
+    def test_pending_report_pagination_keeps_original_turn_and_receipt(self):
+        b = self.begin(); token = b['checkpoint_token']; expected = []
+        for i in range(12):
+            receipt = self.api.checkpoint(b['session_ref'], token, self.payload())
+            expected.append(receipt['record_id']); token = receipt['next_checkpoint_token']
+        cursor = None; found = []
+        while True:
+            page = self.api.status(b['session_ref'], full=False, limit=5, pending_cursor=cursor)
+            self.assertEqual(page['pending_reports_count'], 12)
+            for item in page['pending_reports']:
+                self.assertEqual(item['turn_ref'], b['turn_ref'])
+                detail = self.api.status(b['session_ref'], item['checkpoint_token'], full=False)
+                self.assertEqual(detail['checkpoints'][0]['receipt']['record_id'], item['record_id'])
+                found.append(item['record_id'])
+            cursor = page['pending_reports_next_cursor']
+            if cursor is None:
+                break
+        self.assertCountEqual(found, expected)
+
+    def test_transaction_rechecks_conclusion_before_committing(self):
+        b = self.begin(); original = Store.commit_checkpoint
+        def pause_before_commit(store, *args, **kwargs):
+            self.api.conclude_turn(b['turn_ref'], 'paused', reason='竞态暂停')
+            return original(store, *args, **kwargs)
+        with patch.object(Store, 'commit_checkpoint', pause_before_commit):
+            with self.assertRaises(SessionError) as error:
+                self.api.checkpoint(b['session_ref'], b['checkpoint_token'], self.payload())
+        self.assertEqual(error.exception.code, 'turn_concluded')
+        self.assertEqual(len(self.rows('handoffs')), 0)
+        resumed = self.api.resume(b['session_ref'], resume_recording=True)
+        saved = self.api.checkpoint(b['session_ref'], b['checkpoint_token'], self.payload())
+        self.assertEqual(saved['revision'], 1)
+        self.api.conclude_turn(resumed['turn_ref'], 'recorded', [saved['record_id']])
+
+    def test_invalid_replacement_does_not_advance_closed_turn(self):
+        b = self.begin()
+        saved = self.api.checkpoint(b['session_ref'], b['checkpoint_token'], self.payload())
+        self.api.conclude_turn(b['turn_ref'], 'recorded', [saved['record_id']])
+        with self.assertRaises(SessionError):
+            self.api.resume(b['session_ref'], b['checkpoint_token'], 'invalid replacement')
+        self.assertEqual(self.api.status(b['session_ref'])['turn_ref'], b['turn_ref'])
+
 
 
 class WorkspaceConcurrencyTests(unittest.TestCase):

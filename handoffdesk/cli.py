@@ -128,7 +128,10 @@ def main(argv=None):
         if args.command in integration_cli.COMMANDS:
             result = integration_cli.run(args)
             if result is not None:
-                output(result)
+                if args.command == 'doctor' and getattr(args, 'human', False):
+                    print(integration_cli.format_doctor(result))
+                else:
+                    output(result)
             if args.command == 'doctor' and result and not result.get('ok'):
                 return 2
             return 0
@@ -163,6 +166,10 @@ def main(argv=None):
         if args.command == 'configure-roots':
             output(agent_cli.configure_roots(args.app_dir, args.file, args.data_dir))
             return 0
+        if command == 'list':
+            from .reader import ReaderModel
+            output(ReaderModel(args.app_dir, args.data_dir).registered_projects())
+            return 0
         service = Service(args.app_dir, args.data_dir)
         if command in agent_cli.COMMANDS:
             output(agent_cli.dispatch(args, service, sys.stdin))
@@ -171,8 +178,6 @@ def main(argv=None):
             platform_io.ensure_desktop(tk_required=True)
             from .desktop import main as desktop_main
             desktop_main(service)
-        elif command == "list":
-            output(service.list_projects())
         elif command == "show":
             output(service.show(args.project, workline_id=args.workline)) if args.json else print(service.summary(args.project, workline_id=args.workline))
         elif command == "refresh":

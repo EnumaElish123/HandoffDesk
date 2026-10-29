@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 
 from . import integration
+from .integration import format_doctor
 
 
 COMMANDS = {'connect', 'disconnect', 'doctor', 'integration-hook'}
@@ -23,6 +24,7 @@ def register(subparsers):
     doctor = subparsers.add_parser('doctor', help='检查安装、宿主、状态目录与实际写入权限')
     doctor.add_argument('--codex-home', type=Path)
     doctor.add_argument('--skills-home', type=Path)
+    doctor.add_argument('--human', action='store_true', help='用可读中文显示诊断和下一步；默认仍返回 JSON')
     doctor.add_argument('--probe', action='store_true', help='创建临时文件和独立 SQLite 检查本进程权限')
     hook = subparsers.add_parser('integration-hook', help=argparse.SUPPRESS)
     hook.add_argument('--event', choices=integration.EVENTS, required=True)
@@ -56,9 +58,10 @@ def main(argv=None):
     parser.add_argument('--app-dir', type=Path)
     register(parser.add_subparsers(dest='command', required=True))
     try:
-        value = run(parser.parse_args(argv))
-        print(json.dumps(value, ensure_ascii=False, default=str))
-        return 0
+        args = parser.parse_args(argv)
+        value = run(args)
+        print(format_doctor(value) if args.command == 'doctor' and args.human else json.dumps(value, ensure_ascii=False, default=str))
+        return 2 if args.command == 'doctor' and not value.get('ok') else 0
     except (ValueError, OSError) as exc:
         print(json.dumps({'ok': False, 'error': str(exc)}, ensure_ascii=False))
         return 2
