@@ -217,11 +217,15 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(status['receipts'][0]['report_status'], 'observed_in_final')
 
     def test_hook_cli_keeps_stdout_machine_readable(self):
-        command = [sys.executable, '-m', 'handoffdesk.integration_cli', '--app-dir', str(self.app),
+        # Managed hook launchers use UTF-8 explicitly, regardless of the parent's
+        # encoding mode or the Windows locale.
+        command = [sys.executable, '-X', 'utf8', '-m', 'handoffdesk.integration_cli', '--app-dir', str(self.app),
                    'integration-hook', '--event', 'SessionStart']
         result = subprocess.run(command, input=json.dumps({'session_id': 'host', 'cwd': str(self.project)}),
-                                text=True, capture_output=True, check=True)
-        self.assertEqual(json.loads(result.stdout)['hookSpecificOutput']['hookEventName'], 'SessionStart')
+                                text=True, encoding='utf-8', capture_output=True, check=True, timeout=15)
+        context = json.loads(result.stdout)['hookSpecificOutput']
+        self.assertEqual(context['hookEventName'], 'SessionStart')
+        self.assertIn(str(self.app), context['additionalContext'])
         self.assertNotIn('tkinter', result.stdout)
 
 

@@ -2,7 +2,10 @@
 import http.client
 import json
 import sqlite3
+import socketserver
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -15,6 +18,7 @@ class WebReaderTests(unittest.TestCase):
         self.reader = Mock()
         self.reader.projects.return_value = [{'id': 'sample', 'name': '中文项目', 'unread': 1}]
         self.reader.export.return_value = '# 中文记录\n\n已完成内容。\n'
+        self.reader.export_filename.return_value = '2026-10-29-中文项目-中文记录-a12b34cd.md'
         self.api = ReaderAPI(None, reader_factory=lambda: self.reader)
         self.server = LocalReaderServer(self.api)
         self.server.start()
@@ -98,6 +102,8 @@ class WebReaderTests(unittest.TestCase):
             self.assertTrue(result['data']['saved'])
             self.assertEqual(destination.read_text(encoding='utf-8'), '# 中文记录\n\n已完成内容。\n')
             window.create_file_dialog.assert_called_once()
+            self.assertEqual(window.create_file_dialog.call_args.kwargs['save_filename'],
+                             '2026-10-29-中文项目-中文记录-a12b34cd.md')
             self.reader.export.assert_called_once_with('sample:default:1')
 
     def test_cancelled_export_does_not_claim_success(self):
@@ -112,8 +118,44 @@ class WebReaderTests(unittest.TestCase):
         result = self.api.preview('sample:default:1', 'file-id')
         self.assertFalse(result['ok'])
         self.assertEqual(result['error'], '文件不存在。')
+        self.assertEqual(result['category'], 'operation')
+        self.assertEqual(result['code'], 'file_unavailable')
         self.reader.projects.side_effect = sqlite3.OperationalError('database is locked')
         self.assertFalse(self.api.projects()['ok'])
+
+    def test_windows_client_cancellation_does_not_log_unhandled_error_or_stop_server(self):
+        original = socketserver._SocketWriter.write
+        for stage in ('headers', 'body'):
+            with self.subTest(stage=stage):
+                cancelled = []
+
+                def cancel_response(writer, data):
+                    prefix = b'HTTP/' if stage == 'headers' else b'{"ok": true'
+                    if data.startswith(prefix) and not cancelled:
+                        cancelled.append(True)
+                        raise ConnectionAbortedError(10053, 'Client cancelled response')
+                    return original(writer, data)
+
+                with patch.object(self.server.server, 'handle_error') as unhandled, \
+                        patch.object(socketserver._SocketWriter, 'write', cancel_response):
+                    with self.assertRaises((http.client.HTTPException, ConnectionError)):
+                        self.request()
+                    self.assertTrue(cancelled)
+                    unhandled.assert_not_called()
+                self.assertEqual(self.request()[0], 200)
+
+    def test_new_reader_operations_use_authenticated_identity_only_endpoints(self):
+        self.reader.mark_unread.return_value = {'ok': True, 'record_ids': ['sample:default:1']}
+        self.reader.freeze_file.return_value = {'saved': True, 'bytes': 10}
+        for method, args in [('mark_unread', [['sample:default:1']]),
+                             ('export_filename', ['sample:default:1']),
+                             ('freeze_file', ['sample:default:1', 'attached-file'])]:
+            with self.subTest(method=method):
+                status, _, body = self.request(body=json.dumps({'method': method, 'args': args}))
+                self.assertEqual(status, 200)
+                self.assertTrue(json.loads(body)['ok'])
+        self.assertFalse(self.api.mark_unread('arbitrary-path')['ok'])
+        self.assertFalse(self.api.mark_unread(['sample:default:1'] * 101)['ok'])
 
     def test_frontend_cannot_request_unbounded_pages_or_execute_files(self):
         self.assertFalse(self.api.records(limit=10001)['ok'])
@@ -131,12 +173,24 @@ class WebReaderTests(unittest.TestCase):
             self.api._app_dir = Path(folder)
             status = {'ok': True, 'connected': True, 'hooks_configured': True,
                       'host_trust': 'not_verified', 'app_dir': folder, 'version': 'test'}
-            with patch('handoffdesk.integration.doctor', return_value=status) as doctor:
+            # Execute the displayed command through the platform shell, using a
+            # harmless argument echo instead of installing a real integration.
+            state_path = str(Path(folder) / "中文 O'Brien $` state")
+            prefix = [sys.executable, '-X', 'utf8', '-c',
+                      'import json, sys; print(json.dumps(sys.argv[1:]))',
+                      '--app-dir', state_path]
+            with patch('handoffdesk.integration.doctor', return_value=status) as doctor, \
+                    patch('handoffdesk.integration._prefix', return_value=prefix):
                 value = self.api.connection_status()['data']
             doctor.assert_called_once_with(Path(folder), probe=False)
             self.assertEqual(value['host_trust'], 'not_verified')
             self.assertFalse(value['native_connect'])
-            self.assertIn('connect codex', value['connect_command'])
+            shell = (['powershell.exe', '-NoProfile', '-NonInteractive', '-Command']
+                     if sys.platform == 'win32' else ['/bin/sh', '-c'])
+            result = subprocess.run([*shell, value['connect_command']],
+                                    capture_output=True, text=True, encoding='utf-8', timeout=15)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(json.loads(result.stdout), ['--app-dir', state_path, 'connect', 'codex'])
 
     def test_native_bridge_exposes_functions_without_private_object_graph(self):
         webview = Mock()

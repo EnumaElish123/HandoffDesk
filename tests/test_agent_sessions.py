@@ -1,5 +1,6 @@
 """Recovery, transaction boundaries and truthful reporting of agent checkpoints."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import json
 from pathlib import Path
 import sqlite3
@@ -37,7 +38,7 @@ class AgentSessionTests(unittest.TestCase):
                      'files': [{'path': 'result.md', 'purpose': '本阶段结果'}]}, **options)
 
     def rows(self, table):
-        with sqlite3.connect(self.app / 'data/cards.sqlite3') as db:
+        with closing(sqlite3.connect(self.app / 'data/cards.sqlite3')) as db:
             return db.execute('SELECT * FROM ' + table).fetchall()
 
     def test_begin_auto_connect_is_fixed_and_host_restore_is_idempotent(self):
@@ -224,16 +225,16 @@ class AgentSessionTests(unittest.TestCase):
         bound = self.begin()
         saved = self.api.checkpoint(bound['session_ref'], bound['checkpoint_token'], self.payload())
         path = self.app / 'data/cards.sqlite3'
-        with sqlite3.connect(path) as db:
+        with closing(sqlite3.connect(path)) as db, db:
             raw = db.execute('SELECT payload FROM handoffs').fetchone()[0]
             db.execute('PRAGMA user_version=4')
         Service(self.app)
-        with sqlite3.connect(path) as db:
+        with closing(sqlite3.connect(path)) as db:
             self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 5)
             self.assertEqual(db.execute('SELECT payload FROM handoffs').fetchone()[0], raw)
         backups = list((self.app / 'data/migration-backups').glob('*.sqlite3'))
         self.assertEqual(len(backups), 1)
-        with sqlite3.connect(backups[0]) as db:
+        with closing(sqlite3.connect(backups[0])) as db:
             self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 4)
             self.assertEqual(db.execute('SELECT payload FROM handoffs').fetchone()[0], raw)
             self.assertEqual(db.execute('PRAGMA integrity_check').fetchone()[0], 'ok')

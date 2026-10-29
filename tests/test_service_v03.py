@@ -1,5 +1,6 @@
 """Workflow regressions: independent contexts, explicit review, safe material actions."""
 import sys
+from contextlib import closing
 import copy
 import json
 from pathlib import Path
@@ -241,7 +242,7 @@ class V03ServiceTests(unittest.TestCase):
         sid = self.service.refresh('test')['snapshot']['id']
         original = self.service.save_handoff('test',self.payload(sid),0)
         draft = self.service.save_draft('test',self.draft(sid,kind='plan',base_revision=1),0)
-        with sqlite3.connect(self.service.store.path) as db:
+        with closing(sqlite3.connect(self.service.store.path)) as db, db:
             original_handoff = db.execute('SELECT payload FROM handoffs').fetchone()[0]
             original_snapshots = db.execute('SELECT payload FROM snapshots').fetchall()
             old_draft = db.execute('SELECT payload FROM drafts').fetchone()[0]
@@ -249,17 +250,15 @@ class V03ServiceTests(unittest.TestCase):
             db.execute('CREATE TABLE drafts(project_id TEXT PRIMARY KEY,revision INTEGER NOT NULL,payload TEXT NOT NULL)')
             db.execute('INSERT INTO drafts VALUES(?,?,?)',('test',draft['revision'],old_draft))
             db.execute('PRAGMA user_version=2')
-        db.close()
         reopened = Service(self.app)
         self.assertEqual(reopened.load_draft('test','plan'),draft)
         self.assertIsNone(reopened.load_draft('test','handoff'))
         self.assertEqual(reopened.show('test','default')['handoff'],original)
-        with sqlite3.connect(self.service.store.path) as db:
+        with closing(sqlite3.connect(self.service.store.path)) as db:
             self.assertEqual(db.execute('SELECT payload FROM handoffs').fetchone()[0],original_handoff)
             self.assertEqual(db.execute('SELECT payload FROM snapshots').fetchall(),original_snapshots)
             self.assertEqual(db.execute('SELECT payload FROM drafts').fetchone()[0],old_draft)
             self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0],5)
-        db.close()
 
     def test_rvc_job_switch_returns_to_its_own_plan(self):
         project = {'id':'rvc','name':'RVC','roots':{'main':str(self.source),'applio':str(self.source)},'sources':[],'entries':[]}

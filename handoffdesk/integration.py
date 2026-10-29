@@ -6,7 +6,7 @@ responsible for trusting hooks; writing a configuration never grants that trust.
 from __future__ import annotations
 
 import base64
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import hashlib
 import json
 import os
@@ -323,7 +323,7 @@ def permission_probe(app_dir):
         with tempfile.TemporaryDirectory(prefix='.permission-probe-', dir=app) as folder:
             path = Path(folder)
             (path / 'probe.txt').write_text('handoffdesk permission probe', encoding='utf-8')
-            with sqlite3.connect(path / 'probe.sqlite3', timeout=1) as db:
+            with closing(sqlite3.connect(path / 'probe.sqlite3', timeout=1)) as db, db:
                 db.execute('CREATE TABLE probe(value TEXT)')
                 db.execute('INSERT INTO probe VALUES (?)', ('ok',))
                 db.commit()

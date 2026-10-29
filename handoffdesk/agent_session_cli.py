@@ -25,7 +25,10 @@ def register(subparsers):
     choice.add_argument('--resume', dest='resume_session', help='明确继续已有会话')
     begin.add_argument('--resume-recording', action='store_true', help='用户明确要求后恢复暂停记录')
     sessions = commands.add_parser('sessions', help='按工作目录发现已有任务，不登记新项目')
-    sessions.add_argument('--cwd', type=Path, default=Path.cwd())
+    scope = sessions.add_mutually_exclusive_group()
+    scope.add_argument('--cwd', type=Path)
+    scope.add_argument('--project')
+    sessions.add_argument('--task')
     sessions.add_argument('--limit', type=int, default=20)
     sessions.add_argument('--cursor', type=int)
     checkpoint = commands.add_parser('checkpoint', help='保存语义内容，返回稳定回执和下一令牌')
@@ -38,6 +41,7 @@ def register(subparsers):
     status = commands.add_parser('status', help='读取保存状态、原提案与待汇报回执')
     status.add_argument('--session', required=True)
     status.add_argument('--checkpoint', help='读取这一条的完整原提案和回执')
+    status.add_argument('--summary', action='store_true', help='兼容简洁恢复格式')
     status.add_argument('--full', action='store_true', help='读取完整内容；默认仅输出操作摘要')
     status.add_argument('--limit', type=int, default=10)
     status.add_argument('--cursor', type=int)
@@ -49,6 +53,7 @@ def register(subparsers):
     resume.add_argument('--turn', dest='turn_ref')
     resume.add_argument('--cwd', type=Path, help='核对当前目录，拒绝跨目录静默续接')
     resume.add_argument('--resume-recording', action='store_true', help='用户明确要求后恢复暂停记录')
+    resume.add_argument('--summary', action='store_true', help='兼容简洁恢复格式')
     resume.add_argument('--full', action='store_true', help='完整诊断；默认只返回操作摘要')
     observe = commands.add_parser('observe', help='观察宿主轮次，不创建项目')
     observe.add_argument('--host', default='unknown')
@@ -85,16 +90,16 @@ def run(args, stream=None):
                          args.turn_ref, args.workline, new=args.new,
                          resume_session=args.resume_session, resume_recording=args.resume_recording, full=False)
     if command == 'sessions':
-        return api.sessions(args.cwd, limit=args.limit, cursor=args.cursor)
+        return api.sessions(args.cwd, args.project, args.task, limit=args.limit, cursor=args.cursor)
     if command == 'checkpoint':
         return api.checkpoint(args.session, args.checkpoint,
                               read_payload(args.file, stream or sys.stdin), args.turn_ref)
     if command == 'status':
         return api.status(args.session, args.checkpoint, full=args.full, limit=args.limit,
-                          cursor=args.cursor, pending_cursor=args.pending_cursor)
+                          cursor=args.cursor, pending_cursor=args.pending_cursor, summary=args.summary)
     if command == 'resume':
         return api.resume(args.session, args.replace_checkpoint, args.reason, args.turn_ref,
-                          resume_recording=args.resume_recording, cwd=args.cwd, full=args.full)
+                          resume_recording=args.resume_recording, cwd=args.cwd, full=args.full, summary=args.summary)
     if command == 'observe':
         return api.observe_turn(args.host, args.host_session_id, args.host_turn_id, args.resume_of)
     if command == 'turn-status':

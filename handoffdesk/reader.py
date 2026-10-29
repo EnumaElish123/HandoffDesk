@@ -79,16 +79,17 @@ class ReaderModel:
     def projects(self):
         service = self._service()
         with service.store.connection() as db:
-            counts = dict(db.execute("""SELECT h.project_id, COUNT(CASE WHEN r.record_id IS NULL THEN 1 END) FROM handoffs h
+            statistics = {row[0]: row[1:] for row in db.execute("""SELECT h.project_id,
+                COUNT(CASE WHEN r.record_id IS NULL THEN 1 END), COUNT(*), MAX(h.recorded_at) FROM handoffs h
                 LEFT JOIN reader_reads r ON r.reader_id='local' AND
                 r.record_id=replace(h.project_id, char(31), ':') ||
                     CASE WHEN instr(h.project_id,char(31))=0 THEN ':default' ELSE '' END || ':' || h.revision
-                GROUP BY h.project_id"""))
+                GROUP BY h.project_id""")}
         result = []
         for project in service.list_projects():
             lines = service.list_worklines(project['id'])
             known_lines = {line['id'] for line in lines}
-            for scope in counts:
+            for scope in statistics:
                 if scope.startswith(project['id'] + '\x1f'):
                     historical = scope.split('\x1f', 1)[1]
                     if historical not in known_lines:
@@ -97,7 +98,7 @@ class ReaderModel:
             unread = 0
             for line in lines:
                 scope = project['id'] + ('\x1f' + line['id'] if line['id'] != 'default' else '')
-                line['unread'] = counts.get(scope, 0)
+                line['unread'], line['record_count'], line['latest_recorded_at'] = statistics.get(scope, (0, 0, None))
                 unread += line['unread']
             result.append(dict(project, worklines=lines, unread=unread))
         return result
@@ -134,15 +135,17 @@ class ReaderModel:
         placeholders = ','.join('?' for _ in known)
         conditions.append(f"CASE WHEN instr(h.project_id,char(31))=0 THEN h.project_id ELSE substr(h.project_id,1,instr(h.project_id,char(31))-1) END IN ({placeholders})")
         params.extend(known)
-        sql = """SELECT h.rowid AS position,h.*,r.record_id IS NOT NULL AS is_read FROM handoffs h
+        project_key = "CASE WHEN instr(h.project_id,char(31))=0 THEN h.project_id ELSE substr(h.project_id,1,instr(h.project_id,char(31))-1) END"
+        line_key = "CASE WHEN instr(h.project_id,char(31))=0 THEN 'default' ELSE substr(h.project_id,instr(h.project_id,char(31))+1) END"
+        sql = """SELECT h.rowid AS position,h.*,r.record_id IS NOT NULL AS is_read,f.payload AS file_state FROM handoffs h
             LEFT JOIN reader_reads r ON r.reader_id='local' AND
             r.record_id=replace(h.project_id, char(31), ':') ||
                 CASE WHEN instr(h.project_id,char(31))=0 THEN ':default' ELSE '' END || ':' || h.revision
-            LEFT JOIN snapshots s ON s.id=json_extract(h.payload,'$.source_snapshot_id') AND s.project_id=h.project_id
+            LEFT JOIN node_file_state f ON f.project_id=""" + project_key + " AND f.node_id='record:' || " + line_key + " || ':' || h.revision\n" + """            LEFT JOIN snapshots s ON s.id=json_extract(h.payload,'$.source_snapshot_id') AND s.project_id=h.project_id
             WHERE """ + ' AND '.join(conditions) + ' ORDER BY h.rowid DESC LIMIT ?'
         with service.store.connection() as db:
             if query.strip():
-                needle = query.strip().casefold()
+                needle = self._search_key(query.strip())
                 names = {pid: {line['id']: line['name'] for line in service.list_worklines(pid)}
                          for pid in known}
                 overlays = {(row['project_id'], row['node_id']): json.loads(row['payload'])
@@ -155,12 +158,13 @@ class ReaderModel:
                     if pid not in known:
                         return False
                     payload = json.loads(raw)
-                    fields = [known[pid]['name'], names[pid].get(line, '历史任务'),
+                    fields = [f'{pid}:{line}:{revision}', payload.get('recorded_at', ''), known[pid]['name'], names[pid].get(line, '历史任务'),
                               payload.get('current_task', ''), payload.get('last_done', ''),
                               payload.get('next_action', ''), *payload.get('blockers', [])]
                     verification = payload.get('verification') or {}
-                    fields.extend([verification.get('summary', ''), (payload.get('actor') or {}).get('name', '')])
-                    if any(needle in str(field).casefold() for field in fields):
+                    fields.extend([verification.get('status', ''), verification.get('summary', ''), (payload.get('actor') or {}).get('name', '')])
+                    fields.append({'passed': '验证通过', 'partial': '部分验证', 'not_run': '尚未验证', 'failed': '验证未通过'}.get(verification.get('status'), ''))
+                    if any(needle in self._search_key(field) for field in fields):
                         return True
                     base = payload.get('file_manifest')
                     if base is None:
@@ -172,13 +176,17 @@ class ReaderModel:
                     files = merge_files(base, overlays.get((pid, f'record:{line}:{revision}'), {}))
                     for item in files:
                         path = PureWindowsPath(item['path']) if PureWindowsPath(item['path']).is_absolute() else Path(item['path'])
-                        fields.extend([path.name, item.get('purpose', '')])
-                    return any(needle in str(field).casefold() for field in fields)
+                        fields.extend([str(path), path.name, item.get('purpose', ''), item.get('role', '')])
+                    return any(needle in self._search_key(field) for field in fields)
 
                 db.create_function('visible_match', 4, visible_match)
             rows = db.execute(sql, [*params, limit + 1]).fetchall()
         items = [self._record(service, row, include_files=False) for row in rows[:limit]]
         return {'items': items, 'next_cursor': rows[limit - 1]['position'] if len(rows) > limit else None}
+
+    @staticmethod
+    def _search_key(value):
+        return unicodedata.normalize('NFKC', str(value)).casefold().replace('\\', '/')
 
     @staticmethod
     def _record(service, row, *, include_files):
@@ -188,14 +196,15 @@ class ReaderModel:
         line = next((v for v in service.list_worklines(project) if v['id'] == line_id), {'name': '历史任务'})
         node_id = f"record:{line_id}:{row['revision']}"
         files = []
+        base = payload.get('file_manifest')
+        if base is None:
+            snapshot = service.store.snapshot(payload.get('source_snapshot_id'), row['project_id'])
+            base = service.node_files._snapshot_files(project, snapshot)
+        associations = (json.loads(row['file_state']) if row['file_state'] else {}) if 'file_state' in row.keys() else service.store.node_file_state(project, node_id)
+        manifest = merge_files(base, associations)
         if include_files:
-            base = payload.get('file_manifest')
-            if base is None:
-                snapshot = service.store.snapshot(payload.get('source_snapshot_id'), row['project_id'])
-                base = service.node_files._snapshot_files(project, snapshot)
-            associations = service.store.node_file_state(project, node_id)
             files = [service.node_files._display_file(project, node_id, item)
-                     for item in merge_files(base, associations)]
+                     for item in manifest]
         return {'id': f"{project}:{line_id}:{row['revision']}", 'project_id': project,
                 'project_name': service.registry.get(project)['name'], 'workline_id': line_id,
                 'workline_name': line['name'], 'title': payload.get('current_task') or '进度记录',
@@ -204,7 +213,7 @@ class ReaderModel:
                 'verification': payload.get('verification') or {'status': 'not_run', 'summary': '这条历史记录未提供验证说明。'},
                 'actor': payload.get('actor') or {'name': '历史记录'}, 'recorded_at': row['recorded_at'],
                 'revision': row['revision'], 'read': bool(row['is_read']), 'files': files,
-                'file_count': len(files) if include_files else len(payload.get('file_manifest') or [])}
+                'file_count': len(manifest)}
 
     def detail(self, record_id):
         service = self._service()
@@ -219,8 +228,14 @@ class ReaderModel:
         return self._record(service, row, include_files=True)
 
     def ack(self, record_ids):
+        return self._set_read(record_ids, True)
+
+    def mark_unread(self, record_ids):
+        return self._set_read(record_ids, False)
+
+    def _set_read(self, record_ids, read):
         if not isinstance(record_ids, list) or len(record_ids) > 500:
-            raise ValueError('每次最多确认 500 条已阅读记录。')
+            raise ValueError('每次最多更新 500 条记录的阅读状态。')
         service = self._service()
         rows = []
         for record_id in record_ids:
@@ -231,16 +246,24 @@ class ReaderModel:
             for record_id, scope, revision in rows:
                 if not db.execute('SELECT 1 FROM handoffs WHERE project_id=? AND revision=?', (scope, revision)).fetchone():
                     raise ValueError('待确认的记录不存在。')
-                db.execute("INSERT OR IGNORE INTO reader_reads(reader_id,record_id,read_at) VALUES('local',?,?)", (record_id, now()))
+                if read:
+                    db.execute("INSERT OR IGNORE INTO reader_reads(reader_id,record_id,read_at) VALUES('local',?,?)", (record_id, now()))
+                else:
+                    db.execute("DELETE FROM reader_reads WHERE reader_id='local' AND record_id=?", (record_id,))
         return {'ok': True, 'record_ids': list(dict.fromkeys(record_ids))}
 
     def changes(self, cursor=None):
         service = self._service()
         with service.store.connection() as db:
             event = db.execute('SELECT coalesce(max(sequence),0) FROM progress_events').fetchone()[0]
-            reads = db.execute('SELECT count(*) FROM reader_reads').fetchone()[0]
+            reads = hashlib.sha256()
+            for row in db.execute("SELECT record_id,read_at FROM reader_reads WHERE reader_id='local' ORDER BY record_id"):
+                reads.update(json.dumps(tuple(row), ensure_ascii=False).encode('utf-8'))
+            associations = hashlib.sha256()
+            for row in db.execute('SELECT project_id,node_id,payload FROM node_file_state ORDER BY project_id,node_id'):
+                associations.update(json.dumps(tuple(row), ensure_ascii=False).encode('utf-8'))
             lines = [tuple(row) for row in db.execute('SELECT project_id,workline_id,payload FROM worklines ORDER BY project_id,workline_id')]
-        value = hashlib.sha256(json.dumps([service.registry.fingerprint, event, reads, lines], ensure_ascii=False).encode()).hexdigest()
+        value = hashlib.sha256(json.dumps([service.registry.fingerprint, event, reads.hexdigest(), associations.hexdigest(), lines], ensure_ascii=False).encode()).hexdigest()
         return {'cursor': value, 'changed': cursor != value}
 
     def _file(self, record_id, file_id):
@@ -301,6 +324,29 @@ class ReaderModel:
         with os.fdopen(fd, 'w', encoding='utf-8', newline='\n') as stream:
             stream.write(text)
         return {'path': str(target), 'record_id': record_id}
+    def freeze_file(self, record_id, file_id):
+        # Accept record/file identities, never an arbitrary destination from UI.
+        self._file(record_id, file_id)
+        project, line, revision = self._identity(record_id)
+        return self._service().node_files.save_evidence(project, f'record:{line}:{revision}', file_id)
+
+    def export_filename(self, record_id):
+        value = self.detail(record_id)
+
+        def part(text, maximum):
+            cleaned = ''.join('_' if char in '<>:"/\\|?*' or unicodedata.category(char).startswith('C')
+                              else char for char in unicodedata.normalize('NFKC', str(text)))
+            cleaned = cleaned.strip(' .') or '记录'
+            if PureWindowsPath(cleaned).is_reserved():
+                cleaned = '_' + cleaned
+            # Use UTF-16 units because Windows names may contain emoji.
+            while len(cleaned.encode('utf-16-le')) // 2 > maximum:
+                cleaned = cleaned[:-1]
+            return cleaned.rstrip(' .') or '记录'
+
+        date = part(value['recorded_at'][:10], 10)
+        short_id = hashlib.sha256(record_id.encode('utf-8')).hexdigest()[:8]
+        return f"{date}-{part(value['project_name'], 32)}-{part(value['title'], 96)}-{short_id}.md"
 
     def export(self, record_id):
         value = self.detail(record_id)
@@ -309,10 +355,23 @@ class ReaderModel:
                   f"记录：{value['id']} · {format_recorded_at(value['recorded_at'])}",
                   f"原始时间：{value['recorded_at']}", f"作者：{value['actor'].get('name', '历史记录')}",
                   f"类型：{'计划' if value['kind'] == 'plan' else '进展'}", '', '## 实际完成', value['done'] or '无完成项（计划）',
-                  '', '## 下一步', value['next_action'], '', '## 验证',
+                  '', '## 下一步', value['next_action'], '', '## 验证（记录者报告）',
                   f"{verification['status']}：{verification['summary']}", '', '## 阻碍',
                   '\n'.join('- ' + v for v in value['blockers']) or '未记录阻碍', '', '## 本次文件',
                   '清单保留位置与用途，不包含文件内容；文件仍以磁盘当前版本为准。', '']
         for item in value['files']:
             result.extend([f"- {item['name']}（{item['status']}）", '  用途：' + item.get('purpose', ''), '  位置：' + item['path']])
+            version = item.get('version_status', 'unknown')
+            if version == 'changed':
+                result.append('  版本：与记录时相比已变化；当前文件内容可能不同。')
+            elif version == 'unchanged':
+                result.append('  版本：内容指纹与记录时一致。' if (item.get('recorded_metadata') or {}).get('sha256')
+                              else '  版本：大小和修改时间一致，未逐字比对内容。')
+            elif version == 'unknown':
+                result.append('  版本：没有可比对的记录时版本信息。')
+            if item.get('evidence'):
+                evidence = item['evidence']
+                result.extend(['  证据副本保存时间：' + evidence['frozen_at'],
+                               '  来源：' + evidence['source_path'],
+                               '  保存的是操作时的当前内容，不是原记录时的快照；文件内容仍未嵌入此 Markdown。'])
         return safe_text('\n'.join(result)) + '\n'

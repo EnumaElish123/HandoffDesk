@@ -21,6 +21,24 @@ handoffdesk doctor --human --probe
 
 `Stop` 检查本轮处置及待汇报内容，最多请求一次补救。补救延续原轮次的持久预算。纯问答使用内部 `no_record`，不创建空项目或空进度；用户暂停记录时使用 `paused`。中断只保留恢复状态，不重启任务。接入代码只使用宿主稳定事件字段，不读取全量聊天转录。
 
+## 找回会话与简洁状态
+
+没有稳定的宿主会话 ID 时，同名 `agent begin` 会要求明确继续旧任务或用 `--new` 创建独立任务，避免静默生成重复工作线。显式新建可返回同名恢复候选；已经中断的任务应选择原会话。丢失会话编号时，可以先查询：
+
+```sh
+handoffdesk --app-dir <原状态目录> agent sessions --cwd <项目绝对目录>
+handoffdesk --app-dir <原状态目录> agent sessions --project <项目编号> --task "原任务名称" --limit 100
+```
+
+查询不会登记新项目，也不会在未初始化的目录中创建状态。返回最近会话的工作线、目录、记录数、最近活动和恢复命令；默认最多 20 个，最多 100 个，`has_more` 表示还有更早会话，可按任务名缩小范围。`resume_argv` 供程序直接调用；`resume_command` 可复制到返回的 `resume_shell`（Windows 为 PowerShell），其中保留原状态/数据目录和当前解释器。
+
+```sh
+handoffdesk --app-dir <原状态目录> agent status --session <会话编号> --summary
+handoffdesk --app-dir <原状态目录> agent resume --session <会话编号> --summary
+```
+
+`--summary` 返回当前令牌、最新版本、checkpoint 状态、待汇报编号与下一动作，不重复正文和文件清单。待汇报编号最多列 5 个，同时返回总数和是否截断。公开 CLI 默认也返回精简操作摘要，`--summary` 保留另一种兼容摘要格式。需要原提案、附件错误详情或其余待汇报回执时，使用 `status --full` 并按游标翻页；可以加 `--checkpoint <令牌>` 定位一次提交。失败提交修复文件后原令牌原内容重试；冲突或需要修改原提案时，明确使用 `resume --replace-checkpoint <令牌> --reason "处理原因"`，不自动替换已有请求。
+
 ## 从源码安装
 
 开发者可在 Python 3.10+ 环境运行 `python scripts/install.py`；这会建立独立用户环境、安装当前源码及平台阅读依赖，并连接 Codex。`--check` 仅显示目标，不写入或下载。`--prefix` 指定程序目录，`--state-dir` 指定已有状态目录，二者须分离。`--no-connect` 只登记安装。`--codex-home`、`--skills-home` 可用于隔离验证；普通用户无需填写。

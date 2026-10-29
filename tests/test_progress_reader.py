@@ -128,6 +128,10 @@ class ProgressReaderTests(unittest.TestCase):
         with self.service.store.connection(True) as db:
             db.execute('DELETE FROM worklines WHERE project_id=? AND workline_id=?', ('example', line))
         self.assertEqual(self.model.detail(saved['record_id'])['title'], '本轮检查')
+        historical = next(item for item in self.model.projects()[0]['worklines'] if item['id'] == line)
+        self.assertEqual(historical['record_count'], 1)
+        self.assertEqual(self.model.records(project='example', workline=line)['items'][0]['id'], saved['record_id'])
+        self.assertEqual(self.model.records(project='example', workline=line, query='本轮')['items'][0]['id'], saved['record_id'])
         self.model.ack([saved['record_id']])
         self.assertTrue(self.model.detail(saved['record_id'])['read'])
 

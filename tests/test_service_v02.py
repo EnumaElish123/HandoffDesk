@@ -1,4 +1,5 @@
 import json
+from contextlib import closing
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -236,12 +237,11 @@ class V02ServiceTests(unittest.TestCase):
         original = self.service.save_handoff('test',self.payload(snap['id']),0,'old-op')
         legacy = dict(original)
         legacy.pop('event_kind')
-        with sqlite3.connect(self.service.store.path) as db:
+        with closing(sqlite3.connect(self.service.store.path)) as db, db:
             db.execute('UPDATE handoffs SET payload=?',(json.dumps(legacy),))
             db.execute('DROP TABLE drafts')
             db.execute('DROP TABLE app_preferences')
             db.execute('PRAGMA user_version=1')
-        db.close()
         reopened = Service(self.app)
         self.assertEqual(reopened.show('test')['handoff'],legacy)
         self.assertEqual(reopened.show('test')['last_completion'],legacy)
@@ -251,14 +251,12 @@ class V02ServiceTests(unittest.TestCase):
         self.assertIsNone(reopened.load_draft('test'))
 
     def test_future_database_version_is_not_downgraded(self):
-        with sqlite3.connect(self.service.store.path) as db:
+        with closing(sqlite3.connect(self.service.store.path)) as db, db:
             db.execute('PRAGMA user_version=99')
-        db.close()
         with self.assertRaises(ValueError):
             Service(self.app)
-        with sqlite3.connect(self.service.store.path) as db:
+        with closing(sqlite3.connect(self.service.store.path)) as db:
             self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0],99)
-        db.close()
 
 
 if __name__ == '__main__':

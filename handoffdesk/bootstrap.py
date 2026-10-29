@@ -7,7 +7,7 @@ import tempfile
 import time
 from contextlib import contextmanager
 
-from .paths import app_directory, configuration_path, require_configuration, validate_configuration_writes
+from .paths import _is_within, _resolve_path, app_directory, configuration_path, require_configuration, validate_configuration_writes
 from .registry import Registry
 
 
@@ -37,14 +37,13 @@ def configuration_lock(app, timeout=10):
     if (config / '.projects.lock').exists():
         raise ValueError('项目配置正在被更新；请确认旧版本写入已结束后再处理 config/.projects.lock。')
     guard = config / '.projects.guard'
-    if guard.is_symlink() or not guard.resolve().is_relative_to(config):
+    if guard.is_symlink() or not _is_within(_resolve_path(guard), config):
         raise ValueError('项目配置锁不能重定向。')
     handle = guard.open('a+b')
     acquired = False
     try:
-        if handle.tell() == 0:
-            handle.write(b'0')
-            handle.flush()
+        # Windows can lock a byte beyond EOF; no initialization write is needed.
+        # Writing before acquisition races an owner locking the same empty file.
         deadline = time.monotonic() + timeout
         while True:
             try:

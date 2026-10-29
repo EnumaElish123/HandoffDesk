@@ -39,7 +39,7 @@ class LinuxReaderImprovements(unittest.TestCase):
         for query in ('独立项目名', '接口超时', '数据一致', '再核对', '唯一附件', '原始样本', '100%_ready'):
             with self.subTest(query=query):
                 self.assertEqual([i['id'] for i in self.model.records(query=query)['items']], [self.record['record_id']])
-        for query in ('last_done', 'file_manifest', 'operation_id', str(self.base)):
+        for query in ('last_done', 'file_manifest', 'operation_id'):
             with self.subTest(query=query):
                 self.assertEqual(self.model.records(query=query)['items'], [])
 

@@ -21,6 +21,14 @@ python tests/run_tests.py
 
 Keep real configuration and databases outside the checkout. Initialize an isolated state directory with `--app-dir` for manual testing. Never use personal project records as public fixtures.
 
+For Web UI changes, also run the opt-in browser regressions against an installed Chromium browser and a Node.js Playwright package:
+
+```sh
+python tests/run_browser_reader.py --node /path/to/node --playwright-module /path/to/node_modules/playwright --browser /path/to/chromium --output verification/browser-reader.json
+```
+
+This uses temporary Chinese-path fixtures and a local reader service; it does not launch the legacy Tk desktop. Native Save As behavior still needs a Windows WebView2 window and the system file dialog.
+
 ## Changes and tests
 
 - Describe the user-visible problem, the resulting behavior, and the relevant validation.

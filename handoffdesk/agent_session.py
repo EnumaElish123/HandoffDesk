@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
+import shlex
 import uuid
 
 from .agent_records import AgentRecords, _object, _text
@@ -129,8 +131,24 @@ class AgentSessions:
                             workspace['cwd'], actor, token, turn_ref, now()))
                 db.execute('INSERT INTO agent_checkpoints(token,session_ref,operation_id,base_revision,status,created_at) VALUES(?,?,?,?,?,?)',
                            (token, session_ref, 'hdk-' + uuid.uuid4().hex, row[0] or 0, 'issued', now()))
-        return dict(self.status(session_ref, full=full, limit=100 if full else 10), workspace_added=workspace['added'],
-                    checkout=workspace['checkout'], resumed=existing is not None)
+        result = dict(self.status(session_ref, full=full, limit=100 if full else 10), workspace_added=workspace['added'],
+                      checkout=workspace['checkout'], resumed=existing is not None)
+        if new and host_session_id is None:
+            result['recovery_candidates'] = [v for v in self.sessions(project=project_id, task=task, limit=6)['items'] if v['session_ref'] != session_ref][:5]
+        return result
+
+    def _resume_hint(self, session_ref):
+        from .integration import _prefix
+        argv = _prefix(self.app_dir)
+        if self.data_dir != (self.app_dir / 'data').resolve():
+            argv += ['--data-dir', str(self.data_dir)]
+        argv += ['agent', 'resume', '--session', session_ref, '--summary']
+        # Keep copyable commands readable while preserving literal Windows paths.
+        command = ('& ' + ' '.join("'" + value.replace("'", "''") + "'" for value in argv)
+                   if os.name == 'nt' else shlex.join(argv))
+        return {'resume_argv': argv, 'resume_command': command,
+                'resume_shell': 'powershell' if os.name == 'nt' else 'posix'}
+
 
     def _activate_turn(self, db, session, turn_ref=None, resume_recording=False):
         previous = self._turn(db, session['turn_ref']) if session['turn_ref'] else None
@@ -160,18 +178,28 @@ class AgentSessions:
         db.execute('UPDATE agent_sessions SET turn_ref=? WHERE session_ref=?', (turn_ref, session['session_ref']))
         return turn_ref
 
-    def sessions(self, cwd, *, limit=20, cursor=None):
-        """Discover project tasks without creating a project or state directory."""
+    def sessions(self, cwd=None, project=None, task=None, limit=20, *, cursor=None):
+        """Discover tasks without creating state; retain both supported response names."""
         self._pagination(limit, cursor)
-        workspace = Workspace(self.app_dir, self.data_dir).inspect(cwd)
-        if not workspace['connected'] or not (self.data_dir / 'cards.sqlite3').exists():
-            return {'schema_version': 1, 'ok': True, 'items': [], 'next_cursor': None}
+        if cwd is not None and project is not None:
+            raise ValueError('请按 cwd 或 project 查找会话，不要同时指定。')
+        if task is not None:
+            task = _text(task, 'task', 100, required=True, single_line=True)
+        workspace = Workspace(self.app_dir, self.data_dir).inspect(cwd or Path.cwd()) if project is None else None
+        project_id = (workspace['project']['id'] if workspace['connected'] else None) if workspace else Registry(configuration_path(self.app_dir)).get(project)['id']
+        result = {'schema_version': 1, 'ok': True, 'project': project_id, 'items': [],
+                  'sessions': [], 'next_cursor': None, 'has_more': False, 'limit': limit}
+        if project_id is None or not (self.data_dir / 'cards.sqlite3').exists():
+            return result
         service = Service(self.app_dir, self.data_dir)
-        names = {line['id']: line['name'] for line in service.list_worklines(workspace['project']['id'])}
+        names = {line['id']: line['name'] for line in service.list_worklines(project_id)}
+        conditions, params = ['project_id=?', '(? IS NULL OR rowid<?)'], [project_id, cursor, cursor]
+        if task is not None:
+            matching = [line for line, name in names.items() if name == task]
+            conditions.append('(task_key=? OR workline_id IN (' + ','.join('?' for _ in matching) + '))')
+            params.extend([_digest({'task': task}), *matching])
         with service.store.connection() as db:
-            rows = db.execute('SELECT rowid AS position,* FROM agent_sessions WHERE project_id=? AND (? IS NULL OR rowid<?) ORDER BY rowid DESC LIMIT ?',
-                              (workspace['project']['id'], cursor, cursor, limit + 1)).fetchall()
-            items = []
+            rows = db.execute('SELECT rowid AS position,* FROM agent_sessions WHERE ' + ' AND '.join(conditions) + ' ORDER BY rowid DESC LIMIT ?', (*params, limit + 1)).fetchall()
             for row in rows[:limit]:
                 session = dict(row)
                 turn = self._turn(db, session['turn_ref'])
@@ -179,17 +207,26 @@ class AgentSessions:
                 latest = json.loads(latest[0]) if latest else None
                 pending = db.execute("SELECT COUNT(*) FROM agent_checkpoints WHERE session_ref=? AND request IS NOT NULL AND receipt IS NULL AND status<>'superseded'", (session['session_ref'],)).fetchone()[0]
                 reports = db.execute("SELECT COUNT(*) FROM agent_checkpoints c WHERE c.session_ref=? AND c.receipt IS NOT NULL AND NOT EXISTS (SELECT 1 FROM agent_reports r WHERE r.record_id=json_extract(c.receipt,'$.record_id'))", (session['session_ref'],)).fetchone()[0]
-                same = session['cwd'] == workspace['cwd']
-                items.append({'session_ref': session['session_ref'], 'task_id': session['workline_id'],
-                              'task': names.get(session['workline_id'], session['workline_id']),
-                              'host': session['host'], 'host_session_id': session['host_session_id'],
-                              'cwd': session['cwd'], 'same_directory': same, 'disposition': turn['disposition'],
-                              'latest': self._record_summary(latest), 'pending_checkpoints': pending,
-                              'pending_reports': reports, 'next_action':
-                                  '确认恢复记录后使用 resume --resume-recording' if turn['disposition'] == 'paused' else
-                                  ('resume --session ' + session['session_ref'] if same else '在原目录恢复；当前目录不同，不自动改绑')})
-        return {'schema_version': 1, 'ok': True, 'items': items,
-                'next_cursor': rows[limit - 1]['position'] if len(rows) > limit else None}
+                same = workspace is None or session['cwd'] == workspace['cwd']
+                activity = db.execute('SELECT max(created_at) FROM agent_checkpoints WHERE session_ref=?', (session['session_ref'],)).fetchone()[0]
+                count = db.execute('SELECT count(*) FROM handoffs WHERE project_id=?', (_scope(session),)).fetchone()[0]
+                current = db.execute('SELECT status FROM agent_checkpoints WHERE token=?', (session['current_token'],)).fetchone()
+                result['items'].append({'session_ref': session['session_ref'], 'project': project_id,
+                    'task_id': session['workline_id'], 'workline': session['workline_id'],
+                    'task': names.get(session['workline_id'], session['workline_id']),
+                    'actor': session['actor'], 'host': session['host'], 'host_session_id': session['host_session_id'],
+                    'cwd': session['cwd'], 'same_directory': same, 'disposition': turn['disposition'],
+                    'created_at': session['created_at'], 'last_activity': max(activity or session['created_at'], turn['created_at']),
+                    'record_count': count, 'latest_revision': latest.get('revision', 0) if latest else 0,
+                    'checkpoint_status': current[0] if current else None,
+                    'latest': self._record_summary(latest), 'pending_checkpoints': pending, 'pending_reports': reports,
+                    'next_action': '确认恢复记录后使用 resume --resume-recording' if turn['disposition'] == 'paused' else
+                        ('resume --session ' + session['session_ref'] if same else '在原目录恢复；当前目录不同，不自动改绑'),
+                    **self._resume_hint(session['session_ref'])})
+        result['sessions'] = result['items']
+        result['has_more'] = len(rows) > limit
+        result['next_cursor'] = rows[limit - 1]['position'] if result['has_more'] else None
+        return result
 
     @staticmethod
     def _pagination(limit, cursor):
@@ -317,7 +354,18 @@ class AgentSessions:
                            (encode(error), token))
             raise SessionError('revision_conflict', str(exc), details=details) from exc
         except (OSError, ValueError) as exc:
-            error = {'code': 'attachment_missing' if isinstance(exc, FileNotFoundError) or '不存在' in str(exc) else 'checkpoint_invalid',
+            code = getattr(exc, 'code', None)
+            if code not in {'attachment_missing', 'attachment_invalid', 'attachment_unreadable'}:
+                code = 'attachment_missing' if isinstance(exc, FileNotFoundError) or '不存在' in str(exc) else 'checkpoint_invalid'
+            supplied = getattr(exc, 'details', {})
+            details = {key: value for key, value in supplied.items()
+                       if key in {'file_index', 'input_path', 'resolved_path', 'reason'}} if isinstance(supplied, dict) else {}
+            index = details.get('file_index')
+            if type(index) is int and 0 <= index < len(payload.get('files', [])):
+                # The semantic request retains absolute paths for durable retries;
+                # diagnostics should also preserve the caller's original spelling.
+                details['input_path'] = payload['files'][index]['path']
+            error = {'code': code, **details,
                      'message': str(exc), 'action': '修复原路径后原样重试；若需修改内容，先明确替换失败提交。'}
             with store.connection(True) as db:
                 db.execute("UPDATE agent_checkpoints SET status='failed',error=? WHERE token=? AND receipt IS NULL AND status<>'superseded'",
@@ -331,7 +379,59 @@ class AgentSessions:
         return (f"{action}『{record['current_task']}』，记录 {receipt['record_id']}，附件 {receipt['file_count']} 项；"
                 f"验证（记录者报告）：{record['verification']['summary']}；下一步：{record['next_action']}")
 
-    def status(self, session_ref, checkpoint=None, *, full=True, limit=100, cursor=None, pending_cursor=None):
+    def _status_summary(self, session_ref, checkpoint=None):
+        with self._store().connection() as db:
+            session = self._session(db, session_ref)
+            turn = self._turn(db, session['turn_ref']) if session['turn_ref'] else None
+            token = checkpoint or session['current_token']
+            selected = db.execute('SELECT * FROM agent_checkpoints WHERE session_ref=? AND token=?',
+                                  (session_ref, token)).fetchone()
+            if selected is None:
+                raise SessionError('checkpoint_unknown', '提交令牌不属于此会话。')
+            latest = db.execute('SELECT coalesce(max(revision),0) FROM handoffs WHERE project_id=?',
+                                (_scope(session),)).fetchone()[0]
+            # Iterate receipts one at a time; do not materialize repeated history/request bodies.
+            pending, count = [], 0
+            for row in db.execute('SELECT receipt FROM agent_checkpoints WHERE session_ref=? AND receipt IS NOT NULL ORDER BY rowid',
+                                  (session_ref,)):
+                receipt_id = json.loads(row['receipt'])['record_id']
+                if self._report_status(db, receipt_id) == 'report_pending':
+                    count += 1
+                    if len(pending) < 5:
+                        pending.append(receipt_id)
+            error = json.loads(selected['error']) if selected['error'] else {}
+        actions = {
+            'failed': ('retry_same_payload', '先用 status --checkpoint 读取原提案；修复附件后用原令牌原内容重试。修改内容须 resume --replace-checkpoint 并填写 --reason。'),
+            'conflict': ('resolve_conflict', '先用 status --checkpoint 读取当前记录和原提案；解决冲突后用 resume --replace-checkpoint 并填写 --reason。'),
+            'pending': ('retry_same_payload', '先用 status --checkpoint 读取原提案，再用同一令牌原内容重试。'),
+            'superseded': ('use_current_checkpoint', '所查令牌已替换，请使用 checkpoint_token 指向的当前令牌。'),
+        }
+        action, instruction = actions.get(selected['status'],
+            ('report_pending', '先根据回执查询记录并向用户汇报，然后 ack-report；pending_reports_more 为 true 时用完整 status 读取其余待汇报回执。')
+            if count else ('ready', '当前无需补报；有新的实际成果时使用 checkpoint_token 提交。'))
+        disposition = turn['disposition'] if turn else None
+        if disposition == 'paused':
+            action, instruction = ('start_new_turn', '当前任务已暂停；用户明确恢复记录后使用 resume --resume-recording，再按新轮次提交。')
+        elif disposition in {'no_record', 'recorded'}:
+            action, instruction = ('resume_session', '先处理待汇报回执；继续本任务时运行 resume 创建新的可写轮次。')
+        elif disposition in {'interrupted', 'failed'}:
+            action, instruction = ('resume_session', '当前轮次已中断或失败，先运行 resume --summary 恢复原会话，再按返回动作处理。')
+        return {'schema_version': 1, 'ok': True, 'summary': True,
+                'session_ref': session_ref, 'project': session['project_id'],
+                'workline': session['workline_id'], 'turn_ref': session['turn_ref'],
+                'turn_disposition': disposition,
+                'checkpoint_token': session['current_token'], 'latest_revision': latest,
+                'checkpoint': {'token': selected['token'], 'status': selected['status'],
+                               'base_revision': selected['base_revision'], 'next_token': selected['next_token'],
+                               'error_code': error.get('code')},
+                'pending_reports': pending, 'pending_report_count': count,
+                'pending_reports_more': count > len(pending),
+                'next_action': {'kind': action, 'instruction': instruction}}
+
+
+    def status(self, session_ref, checkpoint=None, *, full=True, limit=100, cursor=None, pending_cursor=None, summary=False):
+        if summary:
+            return self._status_summary(session_ref, checkpoint)
         self._pagination(limit, cursor)
         self._pagination(limit, pending_cursor)
         store = self._store()
@@ -397,7 +497,7 @@ class AgentSessions:
                 'detail_action': 'agent status --session ' + session_ref + ' --checkpoint TOKEN'}
 
     def resume(self, session_ref, replace_checkpoint=None, reason='', turn_ref=None, *,
-               resume_recording=False, cwd=None, full=True):
+               resume_recording=False, cwd=None, full=True, summary=False):
         if cwd is not None:
             cwd = Workspace(self.app_dir, self.data_dir).inspect(cwd)['cwd']
         if replace_checkpoint:
@@ -425,7 +525,7 @@ class AgentSessions:
                 db.execute('INSERT INTO agent_checkpoints(token,session_ref,operation_id,base_revision,status,created_at) VALUES(?,?,?,?,?,?)',
                            (token, session_ref, 'hdk-' + uuid.uuid4().hex, revision, 'issued', now()))
                 db.execute('UPDATE agent_sessions SET current_token=? WHERE session_ref=?', (token, session_ref))
-        return self.status(session_ref, full=full, limit=100 if full else 10)
+        return self.status(session_ref, full=full, limit=100 if full else 10, summary=summary)
 
     def observe_turn(self, host='unknown', host_session_id=None, host_turn_id=None, resume_of=None):
         host = _text(host, 'host', 100, required=True, single_line=True)
