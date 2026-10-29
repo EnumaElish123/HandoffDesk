@@ -74,7 +74,7 @@ Keep state outside registered project roots. Desktop and agent processes must us
 
 ## Boundaries
 
-File associations store locations and purposes; they do not back up or transfer project files. Source snapshots may contain bounded excerpts of explicitly registered documents. Cross machine root mappings do not synchronize databases or rewrite historical file paths. A server's files need a desktop on that machine or separately mounted/transferred files to open locally.
+File associations store locations, purposes and available version metadata; they do not automatically back up or transfer project files. The Windows reader can explicitly save an evidence copy of a current attached file, up to 10 MiB, in the app's data directory. This captures the bytes at that action, not a past version, and is not tamper-proof storage. Source snapshots may contain bounded excerpts of explicitly registered documents. Cross machine root mappings do not synchronize databases or rewrite historical file paths. A server's files need a desktop on that machine or separately mounted/transferred files to open locally.
 
 HandoffDesk does not launch project scripts, training jobs, or development servers. Document opening uses the desktop's default application; scripts open as read-only text and models or unknown file types reveal their directory. The local frontend uses a loopback-only static server; optional browser preview authenticates requests with a per-process token. It is not a remote server or a cloud service.
 

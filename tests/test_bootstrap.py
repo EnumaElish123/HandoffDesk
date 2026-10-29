@@ -153,13 +153,16 @@ class BootstrapTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 app_directory()
 
-    def test_windows_and_linux_platform_defaults(self):
+    @patch('handoffdesk.integration.registered_app_directory', return_value=None)
+    def test_windows_and_linux_platform_defaults(self, registered_directory):
+        # Platform defaults apply only when no installation has registered state.
         with patch.dict(os.environ, {'LOCALAPPDATA': str(self.base)}, clear=True), patch('handoffdesk.paths.sys.platform', 'win32'):
             self.assertEqual(app_directory(), self.base / 'HandoffDesk')
         with patch.dict(os.environ, {'XDG_DATA_HOME': str(self.base)}, clear=True), patch('handoffdesk.paths.sys.platform', 'linux'):
             self.assertEqual(app_directory(), self.base / 'handoffdesk')
         with patch.dict(os.environ, {'XDG_DATA_HOME': 'relative'}, clear=True), patch('handoffdesk.paths.sys.platform', 'linux'), patch('handoffdesk.paths.Path.home', return_value=self.base):
             self.assertEqual(app_directory(), self.base / '.local/share/handoffdesk')
+        self.assertEqual(registered_directory.call_count, 3)
 
     def test_headless_schema_and_init_do_not_import_tk_or_write_package(self):
         code = """import json, sys

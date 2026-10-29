@@ -4,12 +4,21 @@ from __future__ import annotations
 import hashlib
 import json
 
-from .node_files import MAX_FILES, file_id, local_path, path_key
+from .node_files import MAX_FILES, file_id, file_metadata, local_path, path_key
 from .store import ConflictError
 
 
 MAX_PAYLOAD_BYTES = 1024 * 1024
 VERIFICATION_STATES = ('passed', 'partial', 'not_run', 'failed')
+
+
+class AgentAttachmentError(ValueError):
+    """Locate the failed submitted item without changing retry semantics."""
+    def __init__(self, code, index, input_path, resolved_path, reason):
+        self.code = code
+        self.details = {'file_index': index, 'input_path': input_path,
+                        'resolved_path': resolved_path, 'reason': reason}
+        super().__init__(f'files[{index}]（{input_path}）：{reason}')
 
 
 def _object(value, allowed, required, label):
@@ -166,13 +175,25 @@ class AgentRecords:
     @staticmethod
     def _manifest(files):
         manifest, seen = [], set()
-        for item in files:
-            path = local_path(item['path'], must_exist=True)
+        for index, item in enumerate(files):
+            resolved = item['path']
+            try:
+                path = local_path(item['path'])
+                resolved = str(path)
+                if not (path.is_file() or path.is_dir()):
+                    raise AgentAttachmentError('attachment_missing', index, item['path'], resolved,
+                                               '文件或文件夹不存在，请重新选择。')
+            except AgentAttachmentError:
+                raise
+            except (ValueError, OSError) as exc:
+                raise AgentAttachmentError('attachment_unreadable', index, item['path'], resolved, str(exc)) from exc
             key = path_key(path)
             if key in seen:
-                raise ValueError('多个附件解析为同一个文件，请合并用途后提交。')
+                raise AgentAttachmentError('attachment_invalid', index, item['path'], resolved,
+                                           '多个附件解析为同一个文件，请合并用途后提交。')
             seen.add(key)
-            manifest.append(dict(item, path=str(path), origin='manual', is_directory=path.is_dir()))
+            manifest.append(dict(item, path=str(path), origin='manual', is_directory=path.is_dir(),
+                                 recorded_metadata=file_metadata(path)))
         return manifest
 
     def validate(self, payload):

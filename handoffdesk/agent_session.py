@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
+import shlex
 import uuid
 
 from .agent_records import AgentRecords, _object, _text
@@ -116,8 +118,76 @@ class AgentSessions:
                             workspace['cwd'], actor, token, turn_ref, now()))
                 db.execute('INSERT INTO agent_checkpoints(token,session_ref,operation_id,base_revision,status,created_at) VALUES(?,?,?,?,?,?)',
                            (token, session_ref, 'hdk-' + uuid.uuid4().hex, row[0] or 0, 'issued', now()))
-        return dict(self.status(session_ref), workspace_added=workspace['added'],
-                    checkout=workspace['checkout'], resumed=existing is not None)
+        result = dict(self.status(session_ref), workspace_added=workspace['added'],
+                      checkout=workspace['checkout'], resumed=existing is not None)
+        if host_session_id is None:
+            candidates = self.sessions(project=project_id, task=task, limit=6)['sessions']
+            result['recovery_candidates'] = [item for item in candidates if item['session_ref'] != session_ref][:5]
+            if result['recovery_candidates']:
+                result['recovery_hint'] = '本次已新建独立会话；发现同名任务。如需继续原任务，请明确选择候选的 resume 命令，不要按名称自动合并。'
+        return result
+
+    def _resume_hint(self, session_ref):
+        from .integration import _prefix
+        argv = _prefix(self.app_dir)
+        if self.data_dir != (self.app_dir / 'data').resolve():
+            argv += ['--data-dir', str(self.data_dir)]
+        argv += ['agent', 'resume', '--session', session_ref, '--summary']
+        # Keep copyable commands readable while preserving literal Windows paths.
+        command = ('& ' + ' '.join("'" + value.replace("'", "''") + "'" for value in argv)
+                   if os.name == 'nt' else shlex.join(argv))
+        return {'resume_argv': argv, 'resume_command': command,
+                'resume_shell': 'powershell' if os.name == 'nt' else 'posix'}
+
+    def sessions(self, cwd=None, project=None, task=None, limit=20):
+        """Discover existing bindings without connecting a directory or creating state."""
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError('会话数量应为 1 至 100。')
+        if cwd is not None and project is not None:
+            raise ValueError('请按 cwd 或 project 查找会话，不要同时指定。')
+        if task is not None:
+            task = _text(task, 'task', 100, required=True, single_line=True)
+        if project is None:
+            inspected = Workspace(self.app_dir, self.data_dir).inspect(cwd or Path.cwd())
+            project_id = inspected['project']['id'] if inspected['connected'] else None
+        else:
+            project_id = Registry(configuration_path(self.app_dir)).get(project)['id']
+        result = {'schema_version': 1, 'ok': True, 'project': project_id,
+                  'sessions': [], 'has_more': False, 'limit': limit}
+        if project_id is None or not (self.data_dir / 'cards.sqlite3').exists():
+            return result
+        conditions, params = ['s.project_id=?'], [project_id]
+        if task is not None:
+            conditions.append('s.task_key=?')
+            params.append(_digest({'task': task}))
+        scope = "CASE WHEN s.workline_id='default' THEN s.project_id ELSE s.project_id || char(31) || s.workline_id END"
+        sql = f"""SELECT s.*,w.payload AS workline_payload,c.status AS checkpoint_status,
+            t.disposition,
+            (SELECT count(*) FROM handoffs h WHERE h.project_id={scope}) AS record_count,
+            (SELECT coalesce(max(revision),0) FROM handoffs h WHERE h.project_id={scope}) AS latest_revision,
+            max(coalesce((SELECT max(created_at) FROM agent_checkpoints a WHERE a.session_ref=s.session_ref),s.created_at),
+                coalesce(t.created_at,s.created_at)) AS last_activity,
+            (SELECT max(rowid) FROM agent_checkpoints a WHERE a.session_ref=s.session_ref) AS activity_order
+            FROM agent_sessions s
+            LEFT JOIN worklines w ON w.project_id=s.project_id AND w.workline_id=s.workline_id
+            LEFT JOIN agent_checkpoints c ON c.token=s.current_token
+            LEFT JOIN agent_turns t ON t.turn_ref=s.turn_ref
+            WHERE {' AND '.join(conditions)}
+            ORDER BY last_activity DESC,activity_order DESC,s.rowid DESC LIMIT ?"""
+        with self._store().connection() as db:
+            rows = db.execute(sql, [*params, limit + 1]).fetchall()
+        result['has_more'] = len(rows) > limit
+        for row in rows[:limit]:
+            line = json.loads(row['workline_payload']) if row['workline_payload'] else {}
+            result['sessions'].append({
+                'session_ref': row['session_ref'], 'project': row['project_id'],
+                'workline': row['workline_id'], 'task': line.get('name', row['workline_id']),
+                'cwd': row['cwd'], 'actor': row['actor'], 'host': row['host'],
+                'created_at': row['created_at'], 'last_activity': row['last_activity'],
+                'record_count': row['record_count'], 'latest_revision': row['latest_revision'],
+                'checkpoint_status': row['checkpoint_status'], 'disposition': row['disposition'],
+                **self._resume_hint(row['session_ref'])})
+        return result
 
     @staticmethod
     def _local_turn(db, host, host_session_id, original_turn_ref=None):
@@ -225,7 +295,18 @@ class AgentSessions:
                            (encode(error), token))
             raise SessionError('revision_conflict', str(exc), details=details) from exc
         except (OSError, ValueError) as exc:
-            error = {'code': 'attachment_missing' if isinstance(exc, FileNotFoundError) or '不存在' in str(exc) else 'checkpoint_invalid',
+            code = getattr(exc, 'code', None)
+            if code not in {'attachment_missing', 'attachment_invalid', 'attachment_unreadable'}:
+                code = 'attachment_missing' if isinstance(exc, FileNotFoundError) or '不存在' in str(exc) else 'checkpoint_invalid'
+            supplied = getattr(exc, 'details', {})
+            details = {key: value for key, value in supplied.items()
+                       if key in {'file_index', 'input_path', 'resolved_path', 'reason'}} if isinstance(supplied, dict) else {}
+            index = details.get('file_index')
+            if type(index) is int and 0 <= index < len(payload.get('files', [])):
+                # The semantic request retains absolute paths for durable retries;
+                # diagnostics should also preserve the caller's original spelling.
+                details['input_path'] = payload['files'][index]['path']
+            error = {'code': code, **details,
                      'message': str(exc), 'action': '修复原路径后原样重试；若需修改内容，先明确替换失败提交。'}
             with store.connection(True) as db:
                 db.execute("UPDATE agent_checkpoints SET status='failed',error=? WHERE token=? AND receipt IS NULL AND status<>'superseded'",
@@ -239,7 +320,9 @@ class AgentSessions:
         return (f"{action}『{record['current_task']}』，记录 {receipt['record_id']}，附件 {receipt['file_count']} 项；"
                 f"验证（记录者报告）：{record['verification']['summary']}；下一步：{record['next_action']}")
 
-    def status(self, session_ref, checkpoint=None):
+    def status(self, session_ref, checkpoint=None, *, summary=False):
+        if summary:
+            return self._status_summary(session_ref, checkpoint)
         store = self._store()
         with store.connection() as db:
             session = self._session(db, session_ref)
@@ -282,7 +365,54 @@ class AgentSessions:
                 'checkpoints': checkpoints,
                 'pending_reports': pending_reports}
 
-    def resume(self, session_ref, replace_checkpoint=None, reason='', turn_ref=None):
+    def _status_summary(self, session_ref, checkpoint=None):
+        with self._store().connection() as db:
+            session = self._session(db, session_ref)
+            turn = self._turn(db, session['turn_ref']) if session['turn_ref'] else None
+            token = checkpoint or session['current_token']
+            selected = db.execute('SELECT * FROM agent_checkpoints WHERE session_ref=? AND token=?',
+                                  (session_ref, token)).fetchone()
+            if selected is None:
+                raise SessionError('checkpoint_unknown', '提交令牌不属于此会话。')
+            latest = db.execute('SELECT coalesce(max(revision),0) FROM handoffs WHERE project_id=?',
+                                (_scope(session),)).fetchone()[0]
+            # Iterate receipts one at a time; do not materialize repeated history/request bodies.
+            pending, count = [], 0
+            for row in db.execute('SELECT receipt FROM agent_checkpoints WHERE session_ref=? AND receipt IS NOT NULL ORDER BY rowid',
+                                  (session_ref,)):
+                receipt_id = json.loads(row['receipt'])['record_id']
+                if self._report_status(db, receipt_id) == 'report_pending':
+                    count += 1
+                    if len(pending) < 5:
+                        pending.append(receipt_id)
+            error = json.loads(selected['error']) if selected['error'] else {}
+        actions = {
+            'failed': ('retry_same_payload', '先用 status --checkpoint 读取原提案；修复附件后用原令牌原内容重试。修改内容须 resume --replace-checkpoint 并填写 --reason。'),
+            'conflict': ('resolve_conflict', '先用 status --checkpoint 读取当前记录和原提案；解决冲突后用 resume --replace-checkpoint 并填写 --reason。'),
+            'pending': ('retry_same_payload', '先用 status --checkpoint 读取原提案，再用同一令牌原内容重试。'),
+            'superseded': ('use_current_checkpoint', '所查令牌已替换，请使用 checkpoint_token 指向的当前令牌。'),
+        }
+        action, instruction = actions.get(selected['status'],
+            ('report_pending', '先根据回执查询记录并向用户汇报，然后 ack-report；pending_reports_more 为 true 时用完整 status 读取其余待汇报回执。')
+            if count else ('ready', '当前无需补报；有新的实际成果时使用 checkpoint_token 提交。'))
+        disposition = turn['disposition'] if turn else None
+        if disposition in {'paused', 'no_record'}:
+            action, instruction = ('start_new_turn', '当前轮次已暂停或声明无需记录。确有新工作时先 observe 新轮次，再用 resume --turn 明确绑定后提交。')
+        elif disposition in {'interrupted', 'failed'}:
+            action, instruction = ('resume_session', '当前轮次已中断或失败，先运行 resume --summary 恢复原会话，再按返回动作处理。')
+        return {'schema_version': 1, 'ok': True, 'summary': True,
+                'session_ref': session_ref, 'project': session['project_id'],
+                'workline': session['workline_id'], 'turn_ref': session['turn_ref'],
+                'turn_disposition': disposition,
+                'checkpoint_token': session['current_token'], 'latest_revision': latest,
+                'checkpoint': {'token': selected['token'], 'status': selected['status'],
+                               'base_revision': selected['base_revision'], 'next_token': selected['next_token'],
+                               'error_code': error.get('code')},
+                'pending_reports': pending, 'pending_report_count': count,
+                'pending_reports_more': count > len(pending),
+                'next_action': {'kind': action, 'instruction': instruction}}
+
+    def resume(self, session_ref, replace_checkpoint=None, reason='', turn_ref=None, *, summary=False):
         store = self._store()
         with store.connection(True) as db:
             session = self._session(db, session_ref)
@@ -313,7 +443,7 @@ class AgentSessions:
                 db.execute('INSERT INTO agent_checkpoints(token,session_ref,operation_id,base_revision,status,created_at) VALUES(?,?,?,?,?,?)',
                            (token, session_ref, 'hdk-' + uuid.uuid4().hex, revision, 'issued', now()))
                 db.execute('UPDATE agent_sessions SET current_token=? WHERE session_ref=?', (token, session_ref))
-        return self.status(session_ref)
+        return self.status(session_ref, summary=summary)
 
     def observe_turn(self, host='unknown', host_session_id=None, host_turn_id=None, resume_of=None):
         host = _text(host, 'host', 100, required=True, single_line=True)

@@ -20,6 +20,12 @@ def register(subparsers):
     begin.add_argument('--host-session-id')
     begin.add_argument('--turn', dest='turn_ref')
     begin.add_argument('--workline')
+    sessions = commands.add_parser('sessions', help='按项目列出最近会话及恢复命令，不创建新项目')
+    scope = sessions.add_mutually_exclusive_group()
+    scope.add_argument('--cwd', type=Path)
+    scope.add_argument('--project')
+    sessions.add_argument('--task', help='只查找此任务名称的会话')
+    sessions.add_argument('--limit', type=int, default=20)
     checkpoint = commands.add_parser('checkpoint', help='保存语义内容，返回稳定回执和下一令牌')
     checkpoint.add_argument('--session', required=True)
     checkpoint.add_argument('--checkpoint', required=True)
@@ -30,11 +36,13 @@ def register(subparsers):
     status = commands.add_parser('status', help='读取保存状态、原提案与待汇报回执')
     status.add_argument('--session', required=True)
     status.add_argument('--checkpoint')
+    status.add_argument('--summary', action='store_true', help='只返回当前状态、待汇报回执及下一动作')
     resume = commands.add_parser('resume', help='恢复原任务；明确解决失败或冲突后可替换令牌')
     resume.add_argument('--session', required=True)
     resume.add_argument('--replace-checkpoint')
     resume.add_argument('--reason', default='')
     resume.add_argument('--turn', dest='turn_ref')
+    resume.add_argument('--summary', action='store_true', help='恢复后返回简洁状态；省略时保留完整输出')
     observe = commands.add_parser('observe', help='观察宿主轮次，不创建项目')
     observe.add_argument('--host', default='unknown')
     observe.add_argument('--host-session-id')
@@ -71,10 +79,12 @@ def run(args, stream=None):
     if command == 'checkpoint':
         return api.checkpoint(args.session, args.checkpoint,
                               read_payload(args.file, stream or sys.stdin), args.turn_ref)
+    if command == 'sessions':
+        return api.sessions(args.cwd, args.project, args.task, args.limit)
     if command == 'status':
-        return api.status(args.session, args.checkpoint)
+        return api.status(args.session, args.checkpoint, summary=args.summary)
     if command == 'resume':
-        return api.resume(args.session, args.replace_checkpoint, args.reason, args.turn_ref)
+        return api.resume(args.session, args.replace_checkpoint, args.reason, args.turn_ref, summary=args.summary)
     if command == 'observe':
         return api.observe_turn(args.host, args.host_session_id, args.host_turn_id, args.resume_of)
     if command == 'turn-status':

@@ -7,6 +7,7 @@ import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import posixpath
 import re
+import stat
 import subprocess
 import uuid
 
@@ -15,6 +16,8 @@ from . import platform_io
 
 
 MAX_FILES = 500
+METADATA_HASH_LIMIT = 1024 * 1024
+EVIDENCE_SIZE_LIMIT = 10 * 1024 * 1024
 SCRIPTS = {'.py', '.pyw', '.js', '.jse', '.ts', '.ps1', '.psm1', '.bat', '.cmd',
            '.vbs', '.vbe', '.wsf', '.wsh', '.sh', '.reg', '.sql', '.ipynb'}
 DOCUMENTS = {'.md', '.txt', '.json', '.yaml', '.yml', '.toml', '.csv', '.tsv', '.log',
@@ -22,6 +25,58 @@ DOCUMENTS = {'.md', '.txt', '.json', '.yaml', '.yml', '.toml', '.csv', '.tsv', '
              '.wav', '.mp3', '.m4a', '.flac', '.ogg', '.mp4', '.mkv', '.mov', '.avi',
              '.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx', '.rtf', '.zip'}
 WEIGHTS = {'.pth', '.pt', '.bin', '.safetensors', '.ckpt', '.index', '.onnx'}
+
+
+def file_metadata(path, *, hash_limit=METADATA_HASH_LIMIT):
+    """Best-effort bounded evidence; never mistake a directory for file content."""
+    path = Path(path)
+    try:
+        before = path.stat(follow_symlinks=False)
+        if not stat.S_ISREG(before.st_mode):
+            return None
+        result = {'size': before.st_size, 'mtime_ns': before.st_mtime_ns}
+        if before.st_size <= hash_limit:
+            try:
+                fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+                with os.fdopen(fd, 'rb') as stream:
+                    opened = os.fstat(stream.fileno())
+                    if (not stat.S_ISREG(opened.st_mode)
+                            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)):
+                        return None
+                    data = stream.read(hash_limit + 1)
+                    after = os.fstat(stream.fileno())
+                if (after.st_size, after.st_mtime_ns) != (before.st_size, before.st_mtime_ns):
+                    return None
+                if len(data) == before.st_size:
+                    result['sha256'] = hashlib.sha256(data).hexdigest()
+            except OSError:
+                # Files can still be associated when another program locks
+                # their contents; metadata-only comparison is labelled as such.
+                pass
+        return result
+    except (OSError, ValueError):
+        return None
+
+
+def _version_evidence(recorded, current, *, allowed, exists):
+    valid = lambda value: (isinstance(value, dict)
+                           and type(value.get('size')) is int and value['size'] >= 0
+                           and type(value.get('mtime_ns')) is int)
+    recorded = recorded if valid(recorded) else None
+    current = current if valid(current) else None
+    state, basis = 'unknown', 'unknown'
+    if allowed and not exists:
+        state = 'missing'
+    elif recorded is not None and current is not None:
+        different_metadata = any(recorded[key] != current[key] for key in ('size', 'mtime_ns'))
+        if different_metadata:
+            state, basis = 'changed', 'metadata'
+        elif recorded.get('sha256') and current.get('sha256'):
+            state, basis = ('unchanged' if recorded['sha256'] == current['sha256'] else 'changed'), 'sha256'
+        elif not recorded.get('sha256'):
+            state, basis = 'unchanged', 'metadata'
+    return {'recorded_metadata': recorded, 'current_metadata': current,
+            'version_status': state, 'version_basis': basis}
 
 
 def local_path(value, *, must_exist=False, resolve_links=True):
@@ -293,16 +348,132 @@ class NodeFiles:
             kind, action, label = '其他文件', 'reveal', '在资源管理器中打开'
         if not exists:
             action, label = 'reveal', '定位所在文件夹'
+        evidence = _version_evidence(item.get('recorded_metadata'),
+                                     file_metadata(path, hash_limit=EVIDENCE_SIZE_LIMIT if item.get('evidence') else METADATA_HASH_LIMIT)
+                                     if allowed and exists and not is_dir else None,
+                                     allowed=allowed, exists=exists)
         return dict(item, id=file_id(project_id, node_id, item['path']), name=path.name or str(path),
                     parent=str(path.parent), kind=kind, exists=exists,
                     status='位置不可访问' if not allowed else '可用' if exists else '文件已缺失',
-                    open_action=action, action_label=label)
+                    open_action=action, action_label=label, **evidence)
 
     def get(self, project_id, node_id):
         project_id, node, base, state, notice = self._resolve(project_id, node_id)
         files = [self._display_file(project_id, node_id, item) for item in merge_files(base, state)]
         node['file_count'] = len(files)
         return {'node': node, 'files': files, 'notice': notice}
+
+    def _capture_versions(self, project_id, node_id, items):
+        # A newly saved record describes save-time versions, even when a file
+        # was associated earlier. Restoring an old record keeps its old baseline.
+        return [dict(item, recorded_metadata=self._display_file(project_id, node_id, item)['current_metadata'])
+                for item in items]
+
+    def _evidence_path(self, relative):
+        path = self.service._write_path(relative)
+        expected = self.service.data_dir / relative
+        if path_key(path) != path_key(expected):
+            raise ValueError('证据目录或文件已重定向，已停止保存。')
+        return path
+
+    def save_evidence(self, project_id, node_id, identity):
+        """Explicitly preserve the current bytes, not a historical version."""
+        project_id, node, base, state, _ = self._resolve(project_id, node_id)
+        if node['kind'] == 'current':
+            raise ValueError('请先选择一条进度记录或保存的文件节点，再保存证据副本。')
+        original = self._selected(project_id, node_id, identity, base, state)
+        item = self._display_file(project_id, node_id, original)
+        if item['status'] != '可用':
+            raise ValueError(item['status'] + '：' + item['path'])
+        source = Path(item['path'])
+        before = source.stat(follow_symlinks=False)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError('证据副本只支持普通文件，不复制文件夹。')
+        if before.st_size > EVIDENCE_SIZE_LIMIT:
+            raise ValueError('证据副本每个文件最多 10 MiB。')
+        fd = os.open(source, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+        with os.fdopen(fd, 'rb') as stream:
+            opened = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(opened.st_mode)
+                    or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)):
+                raise ValueError('文件位置已变化，请刷新后重试。')
+            content = stream.read(EVIDENCE_SIZE_LIMIT + 1)
+            after = os.fstat(stream.fileno())
+        if len(content) > EVIDENCE_SIZE_LIMIT:
+            raise ValueError('证据副本每个文件最多 10 MiB。')
+        if ((before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns)
+                or path_key(local_path(source)) != path_key(source)):
+            raise ValueError('保存期间文件已变化，请刷新后重试。')
+        digest = hashlib.sha256(content).hexdigest()
+        scope = hashlib.sha256((project_id + '\0' + node_id).encode('utf-8')).hexdigest()[:24]
+        suffix = source.suffix if re.fullmatch(r'\.[A-Za-z0-9]{1,12}', source.suffix) else '.bin'
+        folder = Path('evidence') / scope
+        created = None
+        result = {}
+
+        def update(latest):
+            nonlocal created
+            # Revalidate association under the write lock; another window may
+            # have removed/relinked it while the bounded source was read.
+            selected = self._selected(project_id, node_id, identity, base, latest)
+            if selected['path'] != str(source):
+                raise ValueError('文件关联已变化，请刷新后重试。')
+            existing = merge_files(base, latest)
+            for value in existing:
+                evidence = value.get('evidence') or {}
+                if evidence.get('source_path') != str(source) or evidence.get('sha256') != digest:
+                    continue
+                candidate = Path(value['path'])
+                try:
+                    relative = candidate.relative_to(self.service.data_dir)
+                    checked = self._evidence_path(relative)
+                    current = file_metadata(checked, hash_limit=EVIDENCE_SIZE_LIMIT)
+                except (OSError, ValueError):
+                    continue
+                if current and current.get('sha256') == digest:
+                    result.update(file=value, reused=True)
+                    return latest
+            if len(existing) >= MAX_FILES:
+                raise ValueError(f'每个节点最多关联 {MAX_FILES} 个文件或文件夹。')
+            self._evidence_path(folder).mkdir(parents=True, exist_ok=True)
+            self._evidence_path(folder)
+            # A unique path belongs to this transaction alone. Identical
+            # committed copies are reused above, under the same database lock.
+            relative = folder / (identity + '-' + digest[:16] + '-' + uuid.uuid4().hex[:16] + suffix)
+            target = self._evidence_path(relative)
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+            created = relative
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            self._evidence_path(relative)
+            metadata = file_metadata(target, hash_limit=EVIDENCE_SIZE_LIMIT)
+            if not metadata or metadata.get('sha256') != digest:
+                raise ValueError('证据副本校验失败，请重试。')
+            value = {'path': str(target), 'origin': 'manual', 'purpose': '证据副本（保存时的当前版本）：' + source.name,
+                     'is_directory': False, 'recorded_metadata': metadata,
+                     'evidence': {'source_path': str(source), 'frozen_at': now(), 'sha256': digest,
+                                  'version': 'current_at_save'}}
+            additions = list(latest['additions']) + [value]
+            result.update(file=value, reused=False)
+            return {'additions': additions, 'hidden': list(latest['hidden'])}
+
+        try:
+            self.store.update_node_files(project_id, node_id, update)
+        except BaseException:
+            if created is not None:
+                # Remove only our newly-created, still-contained file. Never
+                # unlink a redirected destination or an existing evidence copy.
+                try:
+                    self._evidence_path(created).unlink(missing_ok=True)
+                except (OSError, ValueError):
+                    pass
+            raise
+        value = result['file']
+        return {'saved': True, 'reused': result['reused'], 'file': self._display_file(project_id, node_id, value),
+                'source_path': str(source), 'frozen_at': value['evidence']['frozen_at'],
+                'bytes': len(content), 'sha256': digest}
 
     def create(self, project_id, title, workline_id=None, description='', include_current=True):
         project_id, scope, line = self.service._scope(project_id, workline_id)
@@ -312,7 +483,7 @@ class NodeFiles:
             raise ValueError('节点说明或包含当前文件的选项无效。')
         base = self._current_files(project_id, scope, line) if include_current else []
         state = self.store.node_file_state(project_id, 'current:' + line['id']) if include_current else {}
-        manifest = merge_files(base, state)
+        manifest = self._capture_versions(project_id, 'current:' + line['id'], merge_files(base, state))
         if len(manifest) > MAX_FILES:
             raise ValueError(f'每个节点最多关联 {MAX_FILES} 个文件或文件夹。')
         node = self._metadata(line, 'manual:' + uuid.uuid4().hex, 'manual', title.strip(), now(), description.strip())
@@ -326,7 +497,8 @@ class NodeFiles:
         if not isinstance(purpose, str) or len(purpose) > 2000:
             raise ValueError('文件用途应为 2000 字以内的文字。')
         selected = [local_path(path, must_exist=True) for path in paths]
-        items = [{'path': str(path), 'origin': 'manual', 'purpose': purpose.strip(), 'is_directory': path.is_dir()}
+        items = [{'path': str(path), 'origin': 'manual', 'purpose': purpose.strip(), 'is_directory': path.is_dir(),
+                  'recorded_metadata': file_metadata(path)}
                  for path in selected]
         def update(state):
             additions = {path_key(item['path']): item for item in state['additions']}
@@ -437,7 +609,8 @@ class NodeFiles:
         # entries must not be presented as historical evidence for that record.
         base = (self._snapshot_files(project_id, self.store.snapshot(snapshot_id, scope)) if snapshot_id is not None
                 else self._current_files(project_id, scope, line))
-        return merge_files(base, self.store.node_file_state(project_id, 'current:' + line['id']))
+        return self._capture_versions(project_id, 'current:' + line['id'],
+                                      merge_files(base, self.store.node_file_state(project_id, 'current:' + line['id'])))
 
     def open(self, project_id, node_id, identity, action='open'):
         if not isinstance(action, str) or action not in {'open', 'reveal', 'copy'}:

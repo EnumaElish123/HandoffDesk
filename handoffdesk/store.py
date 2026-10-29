@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 import shutil
 import uuid
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 
 
@@ -121,7 +121,8 @@ class Store:
         folder.mkdir(exist_ok=True)
         stem = 'before-v5-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S') + '-' + uuid.uuid4().hex[:8]
         backup = folder / (stem + '.sqlite3')
-        with sqlite3.connect(str(self.path), timeout=10) as source, sqlite3.connect(str(backup)) as destination:
+        with closing(sqlite3.connect(str(self.path), timeout=10)) as source, \
+                closing(sqlite3.connect(str(backup))) as destination:
             source.backup(destination)
         if configuration is not None:
             config = Path(configuration)

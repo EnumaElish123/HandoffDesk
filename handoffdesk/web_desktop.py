@@ -18,7 +18,8 @@ import webbrowser
 
 ASSETS = Path(__file__).with_name('web')
 MAX_REQUEST_BYTES = 64 * 1024
-METHODS = frozenset({'projects', 'records', 'detail', 'ack', 'changes', 'preview', 'open_file', 'export', 'connection_status'})
+METHODS = frozenset({'projects', 'records', 'detail', 'ack', 'mark_unread', 'changes', 'preview',
+                     'open_file', 'freeze_file', 'export', 'export_filename', 'connection_status'})
 STATIC = {'/': ('index.html', 'text/html; charset=utf-8'),
           '/index.html': ('index.html', 'text/html; charset=utf-8'),
           '/app.css': ('app.css', 'text/css; charset=utf-8'),
@@ -44,7 +45,10 @@ class ReaderAPI:
             value = getattr(self._reader(), method)(*args, **kwargs)
             return {'ok': True, 'data': value}
         except (ValueError, OSError, KeyError, sqlite3.Error) as exc:
-            return {'ok': False, 'error': str(exc)}
+            code = ('storage_unavailable' if isinstance(exc, sqlite3.Error)
+                    else 'file_unavailable' if method in {'preview', 'open_file', 'freeze_file'}
+                    else 'operation_failed')
+            return {'ok': False, 'error': str(exc), 'code': code, 'category': 'operation'}
 
     def projects(self):
         return self._call('projects')
@@ -68,6 +72,11 @@ class ReaderAPI:
     def changes(self, cursor=None):
         return self._call('changes', cursor)
 
+    def mark_unread(self, record_ids):
+        if not isinstance(record_ids, list) or len(record_ids) > 100:
+            return {'ok': False, 'error': '每次最多标记 100 条未读记录。', 'category': 'operation'}
+        return self._call('mark_unread', record_ids)
+
     def preview(self, record_id, file_id):
         return self._call('preview', record_id, file_id)
 
@@ -78,6 +87,12 @@ class ReaderAPI:
 
     def export(self, record_id):
         return self._call('export', record_id)
+
+    def export_filename(self, record_id):
+        return self._call('export_filename', record_id)
+
+    def freeze_file(self, record_id, file_id):
+        return self._call('freeze_file', record_id, file_id)
 
     def connection_status(self):
         from .integration import _prefix, doctor, shell_command
@@ -118,10 +133,13 @@ class ReaderAPI:
         result = self.export(record_id)
         if not result['ok']:
             return result
+        filename = self.export_filename(record_id)
+        if not filename['ok']:
+            return filename
         try:
             import webview
             selected = self._window.create_file_dialog(
-                webview.FileDialog.SAVE, save_filename='HandoffDesk-record.md',
+                webview.FileDialog.SAVE, save_filename=filename['data'],
                 file_types=('Markdown (*.md)',))
             if not selected:
                 return {'ok': True, 'data': {'saved': False}}
@@ -146,6 +164,14 @@ class LocalReaderServer:
                 pass
 
             def _reply(self, status, body, content_type='application/json; charset=utf-8'):
+                try:
+                    self._write_reply(status, body, content_type)
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    # A refresh/closed tab may cancel either headers or body on
+                    # Windows. Only transport cancellation is suppressed.
+                    self.close_connection = True
+
+            def _write_reply(self, status, body, content_type):
                 if not isinstance(body, bytes):
                     body = json.dumps(body, ensure_ascii=False).encode('utf-8')
                 self.send_response(status)
@@ -162,11 +188,7 @@ class LocalReaderServer:
                 style_policy = "'self'" if owner.browser_api else "'self' 'unsafe-inline'"
                 self.send_header('Content-Security-Policy', f"default-src 'self'; script-src {script_policy}; style-src {style_policy}; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'")
                 self.end_headers()
-                try:
-                    self.wfile.write(body)
-                except (BrokenPipeError, ConnectionResetError):
-                    # Closing a tab can cancel an in-flight read without an error log.
-                    pass
+                self.wfile.write(body)
 
             def _host_ok(self):
                 return self.headers.get('Host') == owner.host

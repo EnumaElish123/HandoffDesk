@@ -7,6 +7,13 @@
 - Discover project roots and Git worktrees automatically; bind agent sessions to tasks and save semantic checkpoints with durable receipts and recovery.
 - Add reversible Codex skill/hooks installation, permission diagnostics, and a finite missing-record/report remedy.
 - Migrate SQLite v4 to v5 after a consistent backup without changing historical payloads or record identifiers.
+- Fix Windows SQLite handle cleanup during migration and permission probes, and remove first-run registration races.
+- Keep data boundaries consistent across ordinary and extended Windows paths; correct platform and UTF-8 regression fixtures.
+- Separate file-operation errors from connection status; refresh attachment details without moving the reader, and support reversing read acknowledgements.
+- Search visible record fields, receipts and decoded paths; show distinct task labels and use readable, Windows-safe export names.
+- Add session discovery and compact recovery status, precise attachment diagnostics, save-time file fingerprints and optional bounded evidence copies.
+- Handle cancelled Windows HTTP responses without an unhandled connection-aborted traceback.
+- Document the local Windows fixes and reader acceptance results in the [validation report](docs/windows-validation-2026-10-29.zh-CN.md).
 - Add source and portable-package build tools. Windows native installer, WebView2 and real DPI acceptance remain platform release gates.
 
 ## 0.9.0 — Initial HandoffDesk open source release

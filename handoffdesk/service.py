@@ -16,7 +16,7 @@ from .collectors import collect_project, read_json
 from .store import Store, ConflictError
 from .node_files import NodeFiles
 from . import platform_io
-from .paths import app_directory, require_configuration
+from .paths import _is_within, _resolve_path, app_directory, require_configuration, validate_configuration_writes
 
 
 ORIGINS = {"user_directed": "用户指定", "assistant_suggested": "助手建议", "plan_derived": "计划引用", "agent_recorded": "Agent 记录"}
@@ -31,11 +31,8 @@ class Service:
     def __init__(self, app_dir=None, data_dir=None):
         self.app_dir = app_directory(app_dir)
         self.registry = Registry(require_configuration(self.app_dir))
-        self.data_dir = Path(data_dir or self.app_dir / "data").resolve()
-        for project in self.registry.projects:
-            for root in project["roots"].values():
-                if self.data_dir.is_relative_to(Path(root).resolve()):
-                    raise ValueError("工具数据目录不能放在已接入的项目目录内。")
+        self.data_dir = _resolve_path(data_dir or self.app_dir / "data")
+        validate_configuration_writes(self.app_dir, self.registry.projects, self.data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         for name in ('cards.sqlite3-wal', 'cards.sqlite3-shm', 'cards.sqlite3-journal'):
             self._write_path(name)
@@ -44,11 +41,11 @@ class Service:
         self._focus_lock = threading.RLock()
 
     def _write_path(self, relative):
-        path = (self.data_dir / relative).resolve()
-        if not path.is_relative_to(self.data_dir):
+        path = _resolve_path(self.data_dir / relative)
+        if not _is_within(path, self.data_dir):
             raise ValueError("工具数据路径重定向到了数据目录之外，已停止写入。")
         for project in self.registry.projects:
-            if any(path.is_relative_to(Path(root).resolve()) for root in project['roots'].values()):
+            if any(_is_within(path, _resolve_path(root)) for root in project['roots'].values()):
                 raise ValueError("工具数据路径指向业务项目，已停止写入。")
         return path
 

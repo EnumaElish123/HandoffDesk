@@ -5,7 +5,8 @@
   const $ = (id) => document.getElementById(id);
   const state = { projects: [], project: null, workline: null, unread: false, query: "", items: [],
     next: null, selected: null, detail: null, cursor: null, listRequest: 0, detailRequest: 0,
-    busy: false, pollBusy: false, previewText: "", previousFocus: null, started: false };
+    busy: false, pollBusy: false, manualRefreshPending: false, previewText: "", previousFocus: null, started: false,
+    detailRefresh: 0, fileErrors: new Map() };
   const token = new URLSearchParams(location.hash.slice(1)).get("token");
   const labels = { passed: "验证通过", partial: "部分验证", not_run: "尚未验证", failed: "验证未通过" };
   let searchTimer, toastTimer, polling, connectionFocus;
@@ -35,20 +36,36 @@
 
   async function api(method, ...args) {
     let response;
-    if (window.pywebview && window.pywebview.api) {
-      response = await window.pywebview.api[method](...args);
-    } else if (token) {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 15000);
-      try {
-        const result = await fetch("/api", { method: "POST", headers: { "Content-Type": "application/json", "X-HandoffDesk-Token": token },
-          body: JSON.stringify({ method, args }), signal: controller.signal, cache: "no-store" });
-        response = await result.json();
-      } finally { clearTimeout(timeout); }
-    } else {
-      throw new Error("请从 HandoffDesk 打开阅读窗口。");
+    try {
+      if (window.pywebview && window.pywebview.api) {
+        response = await window.pywebview.api[method](...args);
+      } else if (token) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 15000);
+        try {
+          const result = await fetch("/api", { method: "POST", headers: { "Content-Type": "application/json", "X-HandoffDesk-Token": token },
+            body: JSON.stringify({ method, args }), signal: controller.signal, cache: "no-store" });
+          response = await result.json();
+          if (!result.ok) response = Object.assign({}, response, {
+            ok: false,
+            error: response.error || "本机读取请求未成功，请重新打开或刷新阅读器。",
+            category: response.category || (result.status === 400 ? "operation" : "connection"),
+          });
+        } finally { clearTimeout(timeout); }
+      } else {
+        throw new Error("请从 HandoffDesk 打开阅读窗口。");
+      }
+    } catch (failure) {
+      const error = failure instanceof Error ? failure : new Error(String(failure));
+      error.category = "connection";
+      throw error;
     }
-    if (!response || !response.ok) throw new Error((response && response.error) || "本机读取服务暂不可用。");
+    if (!response || !response.ok) {
+      const error = new Error((response && response.error) || "本机读取服务暂不可用。");
+      error.category = response ? response.category || "operation" : "connection";
+      error.code = response && response.code;
+      throw error;
+    }
     return response.data;
   }
 
@@ -59,11 +76,19 @@
     toastTimer = setTimeout(() => { $("toast").hidden = true; }, 4500);
   }
 
-  function showError(error) {
+  function showError(error, retry = null, label = "操作未完成") {
     const text = error && error.name === "AbortError" ? "读取超时，请刷新重试。" : (error && error.message) || String(error);
-    $("connection-error").textContent = text;
-    $("connection-error").hidden = false;
-    $("live-state").textContent = "等待重新连接";
+    if (error && error.category === "connection") {
+      $("connection-error").textContent = text;
+      $("connection-error").hidden = false;
+      $("live-state").textContent = "等待重新连接";
+    } else {
+      const container = $("operation-error");
+      container.replaceChildren(node("p", "", label + "：" + text));
+      if (retry) container.append(button("重试", "text-button", async () => { container.hidden = true; await retry(); }));
+      container.append(button("关闭提示", "text-button", () => { container.hidden = true; }));
+      container.hidden = false;
+    }
   }
 
   function clearError() {
@@ -105,8 +130,14 @@
     }));
     $("project-select").value = state.project || "";
     const allLines = node("option", "", "全部任务"); allLines.value = "";
-    $("workline-select").replaceChildren(allLines, ...(current ? current.worklines || [] : []).map((line) => {
-      const option = node("option", "", line.name || line.id); option.value = line.id; return option;
+    const lines = current ? current.worklines || [] : [];
+    $("workline-select").replaceChildren(allLines, ...lines.map((line) => {
+      const duplicate = lines.filter((other) => (other.name || other.id) === (line.name || line.id)).length > 1;
+      const count = Number.isInteger(line.record_count) ? ` · ${line.record_count} 条记录` : "";
+      const identity = duplicate ? ` · ${line.id.slice(-8)}` : "";
+      const option = node("option", "", (line.name || line.id) + count + identity);
+      option.title = line.latest_recorded_at ? "最近记录：" + displayDate(line.latest_recorded_at, true) : "暂无记录";
+      option.value = line.id; return option;
     }));
     $("workline-select").value = state.workline || "";
     $("workline-select").disabled = !current;
@@ -181,21 +212,27 @@
     const kicker = node("div", "detail-kicker"), breadcrumb = node("div", "detail-breadcrumb");
     breadcrumb.append(node("span", "project-label", record.project_name), node("span", "", "/"), node("span", "", record.workline_name || "默认任务"));
     const tools = node("div", "detail-tools");
-    tools.append(button("复制摘要", "text-button", async () => {
-      try { await copyText(await api("export", record.id)); } catch (error) { showError(error); }
-    }), button("导出 ↗", "text-button", async () => {
+    const copySummary = async () => {
+      try { await copyText(await api("export", record.id)); }
+      catch (error) { showError(error, copySummary, `复制「${record.title}」未完成`); }
+    };
+    const exportRecord = async () => {
       try {
         if (window.pywebview && window.pywebview.api) {
           const result = await api("save_export", record.id);
           if (result.saved) toast("记录已导出");
         } else {
-          const text = await api("export", record.id), blob = new Blob([text], { type: "text/markdown;charset=utf-8" });
-          const link = node("a"); link.href = URL.createObjectURL(blob); link.download = "HandoffDesk-" + record.id.replace(/[^a-zA-Z0-9_-]/g, "-") + ".md";
+          const [text, filename] = await Promise.all([api("export", record.id), api("export_filename", record.id)]);
+          const blob = new Blob([text], { type: "text/markdown;charset=utf-8" });
+          const link = node("a"); link.href = URL.createObjectURL(blob); link.download = filename;
           document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(link.href), 1000);
           toast("已请求下载记录");
         }
-      } catch (error) { showError(error); }
-    }));
+      } catch (error) { showError(error, exportRecord, `导出「${record.title}」未完成`); }
+    };
+    const copyButton = button("复制摘要", "text-button", copySummary), exportButton = button("导出 ↗", "text-button", exportRecord);
+    copyButton.dataset.focusKey = "copy-summary"; exportButton.dataset.focusKey = "export-record";
+    tools.append(copyButton, exportButton);
     kicker.append(breadcrumb, tools);
     const title = node("h2", "detail-title", record.title);
     const byline = node("div", "detail-byline");
@@ -212,39 +249,127 @@
     }
     const verification = record.verification || { status: "not_run", summary: "未提供验证说明。" };
     const verified = node("div", "verification " + (Object.prototype.hasOwnProperty.call(labels, verification.status) ? verification.status : "not_run"));
-    const verifyText = node("div"); verifyText.append(node("strong", "", labels[verification.status] || "验证说明"), node("p", "", verification.summary));
+    const verifyText = node("div"); verifyText.append(node("strong", "", (labels[verification.status] || "验证说明") + " · 记录者报告"), node("p", "", verification.summary));
     verified.append(node("span", "verification-dot", verification.status === "passed" ? "✓" : "◉"), verifyText);
     pane.append(verified);
     const files = node("div", "file-list");
     for (const file of record.files || []) {
       const card = node("article", "file-card");
+      card.dataset.fileId = file.id;
       const extension = file.is_directory ? "DIR" : (file.name || "").split(".").pop().slice(0, 4).toUpperCase();
       const info = node("div");
-      info.append(node("h4", "file-name", file.name || file.path), node("p", "file-purpose", file.purpose || "未填写用途"), node("p", "file-path", file.path));
+      const displayName = file.evidence && file.evidence.source_path
+        ? String(file.evidence.source_path).split(/[\\/]/).pop() + "（证据副本）" : file.name || file.path;
+      info.append(node("h4", "file-name", displayName), node("p", "file-purpose", file.purpose || "未填写用途"), node("p", "file-path", file.path));
       if (file.status && file.status !== "可用") info.append(node("p", "file-status", file.status));
+      if (file.evidence) {
+        info.append(node("p", "file-version", "证据副本 · 保存于 " + displayDate(file.evidence.frozen_at, true) + "，保存的是当时的当前内容，不是原记录时的快照。"));
+      }
+      if (file.version_status === "changed") {
+        info.append(node("p", "file-version changed", file.evidence ? "证据副本与保存时相比已变化；预览显示当前副本内容。" : "与记录时相比已变化；预览显示当前内容。"));
+      } else if (file.version_status === "unchanged") {
+        const hashed = file.recorded_metadata && file.recorded_metadata.sha256;
+        info.append(node("p", "file-version", hashed ? "内容与记录时一致（已核对内容指纹）。" : "大小和修改时间与记录时一致，未逐字比对内容。"));
+      } else if (file.version_status === "unknown") {
+        info.append(node("p", "file-version", file.is_directory ? "目录引用不包含内容快照。" : "无可比对的记录时版本信息；预览显示当前内容。"));
+      }
       const actions = node("div", "file-actions");
-      actions.append(button("预览", "", async () => {
-        try { openPreview(await api("preview", record.id, file.id)); } catch (error) { showError(error); }
-      }), button("打开", "", async () => {
-        try {
-          const result = await api("open_file", record.id, file.id, "open");
-          if (result.action === "preview") openPreview(result);
-          else toast("已请求在本机打开");
-        } catch (error) { showError(error); }
-      }), button("所在位置", "", async () => {
-        try { await api("open_file", record.id, file.id, "reveal"); toast("已请求打开所在位置"); } catch (error) { showError(error); }
-      }), button("复制路径", "", async () => {
-        try { const result = await api("open_file", record.id, file.id, "copy"); await copyText(result.path); } catch (error) { showError(error); }
-      }));
-      info.append(actions); card.append(node("div", "file-icon", extension), info); files.append(card);
+      const fileButton = (label, action) => {
+        const control = button(label, "", () => runFileOperation(record.id, file, action));
+        control.dataset.focusKey = file.id + ":" + action;
+        return control;
+      };
+      actions.append(fileButton("预览", "preview"), fileButton("打开", "open"), fileButton("所在位置", "reveal"), fileButton("复制路径", "copy"));
+      if (!file.is_directory && file.status === "可用" && !file.evidence) {
+        const freeze = fileButton("保存证据副本", "freeze");
+        freeze.title = "保存点击时的当前文件，最多 10 MiB；不是原记录时的历史快照。";
+        if (file.current_metadata && file.current_metadata.size > 10 * 1024 * 1024) {
+          freeze.disabled = true;
+          freeze.title = "文件超过 10 MiB，不能在此保存证据副本。";
+        }
+        actions.append(freeze);
+      }
+      info.append(actions);
+      const issue = state.fileErrors.get(record.id + ":" + file.id);
+      if (issue) {
+        const error = node("div", "operation-error file-operation-error"); error.setAttribute("role", "alert");
+        error.append(node("p", "", issue.message), fileButton("重试", issue.action),
+          button("关闭提示", "text-button", () => { state.fileErrors.delete(record.id + ":" + file.id); redrawDetail(state.detail); }));
+        info.append(error);
+      }
+      card.append(node("div", "file-icon", extension), info); files.append(card);
     }
     if (!files.children.length) files.append(node("p", "file-empty", "本次没有附带文件。"));
     const attachmentSection = section("本次文件", "▤", "files", files);
     attachmentSection.querySelector("h3").append(node("span", "file-count", (record.files || []).length));
+    if (files.querySelector(".file-card")) attachmentSection.insertBefore(node("p", "file-reference-note", "文件关联读取当前内容。可主动保存当前版本的证据副本（最多 10 MiB），不会自动保存原记录时的文件。"), files);
     pane.append(attachmentSection);
     const footer = node("div", "detail-bottom");
-    footer.append(node("span", "record-identity", "记录 " + record.id), node("span", "read-badge", record.read ? "✓ 已读" : "正在标记已读…"));
+    const reading = node("div", "read-controls");
+    const readToggle = button(record.read ? "标为未读" : "标为已读", "text-button read-toggle", () => setRecordRead(record.id, !record.read));
+    readToggle.dataset.focusKey = "read-toggle";
+    reading.append(node("span", "read-badge", record.read ? "✓ 已读" : "未读"), readToggle);
+    footer.append(node("span", "record-identity", "记录 " + record.id), reading);
     pane.append(footer);
+  }
+
+  async function setRecordRead(id, read) {
+    try {
+      await api(read ? "ack" : "mark_unread", [id]);
+      const local = state.items.find((item) => item.id === id);
+      if (local) local.read = read;
+      if (state.selected === id && state.detail) {
+        state.detail.read = read;
+        redrawDetail(state.detail);
+      }
+      state.projects = await api("projects");
+      renderProjects(); await loadRecords({ passive: true });
+    } catch (error) { showError(error, () => setRecordRead(id, read), "更新阅读状态未完成"); }
+  }
+
+  function redrawDetail(record) {
+    if (!record || state.selected !== record.id) return;
+    const pane = $("detail-pane"), scroll = { x: window.scrollX, y: window.scrollY, pane: pane.scrollTop };
+    const focus = pane.contains(document.activeElement) ? document.activeElement.dataset.focusKey : null;
+    const previous = state.previousFocus && state.previousFocus.dataset.focusKey;
+    renderDetail(record);
+    const controls = Array.from(pane.querySelectorAll("[data-focus-key]"));
+    if (focus) controls.find((control) => control.dataset.focusKey === focus)?.focus({ preventScroll: true });
+    if (previous && !state.previousFocus.isConnected) state.previousFocus = controls.find((control) => control.dataset.focusKey === previous) || null;
+    pane.scrollTop = scroll.pane;
+    window.scrollTo(scroll.x, scroll.y);
+  }
+
+  async function refreshCurrentDetail(id = state.selected) {
+    if (!id || state.selected !== id) return;
+    const request = ++state.detailRefresh, selection = state.detailRequest;
+    const record = await api("detail", id);
+    if (request !== state.detailRefresh || selection !== state.detailRequest || state.selected !== id) return;
+    state.detail = record;
+    redrawDetail(record);
+  }
+
+  async function runFileOperation(recordId, file, action) {
+    const key = recordId + ":" + file.id, selection = state.detailRequest;
+    try {
+      let result;
+      if (action === "preview") result = await api("preview", recordId, file.id);
+      else if (action === "freeze") result = await api("freeze_file", recordId, file.id);
+      else result = await api("open_file", recordId, file.id, action);
+      if (state.fileErrors.get(key)?.action === action) state.fileErrors.delete(key);
+      await refreshCurrentDetail(recordId);
+      if (state.selected !== recordId || selection !== state.detailRequest) return;
+      if (action === "preview" || result.action === "preview") openPreview(result);
+      else if (action === "copy") await copyText(result.path);
+      else toast(action === "freeze" ? "已保存当前文件的证据副本" : action === "reveal" ? "已请求打开所在位置" : "已请求在本机打开");
+    } catch (error) {
+      if (error.category === "connection") showError(error);
+      else state.fileErrors.set(key, { message: error.message || String(error), action });
+      if (state.selected === recordId && selection === state.detailRequest) {
+        try { await refreshCurrentDetail(recordId); }
+        catch (refreshError) { showError(refreshError); redrawDetail(state.detail); }
+      }
+    }
   }
 
   function openPreview(value) {
@@ -331,14 +456,16 @@
         $("reading-layout").classList.add("show-detail");
         if (window.innerWidth <= 930) $("detail-pane").scrollIntoView({ block: "start" });
       }
+      if (automatic) return;
       await api("ack", [id]);
       if (request !== state.detailRequest) return;
       record.read = true;
       const local = state.items.find((item) => item.id === id); if (local) local.read = true;
       const badge = $("detail-pane").querySelector(".read-badge"); if (badge) badge.textContent = "✓ 已读";
+      const toggle = $("detail-pane").querySelector(".read-toggle"); if (toggle) toggle.textContent = "标为未读";
       state.projects = await api("projects");
       renderProjects(); renderList(); clearError();
-    } catch (error) { if (request === state.detailRequest) showError(error); }
+    } catch (error) { if (request === state.detailRequest) showError(error, () => openRecord(id, { automatic }), "读取记录未完成"); }
   }
 
   async function loadRecords({ append = false, passive = false } = {}) {
@@ -368,7 +495,7 @@
       renderList(); clearError();
       if (!state.selected && state.items.length && window.innerWidth > 930 && !passive) await openRecord(state.items[0].id, { automatic: true });
       return true;
-    } catch (error) { if (request === state.listRequest) showError(error); return false; }
+    } catch (error) { if (request === state.listRequest) showError(error, () => loadRecords({ append, passive }), "读取记录列表未完成"); return false; }
     finally { if (request === state.listRequest) { state.busy = false; $("load-more").disabled = false; } }
   }
 
@@ -385,7 +512,10 @@
   }
 
   async function refresh({ manual = false } = {}) {
-    if (state.pollBusy) return;
+    if (state.pollBusy) {
+      if (manual) state.manualRefreshPending = true;
+      return;
+    }
     state.pollBusy = true;
     try {
       const changes = await api("changes", state.cursor);
@@ -397,11 +527,18 @@
         }
         renderProjects();
         if (!await loadRecords({ passive: true })) return;
+        await refreshCurrentDetail();
         state.cursor = changes.cursor;
       }
       clearError(); if (manual) toast("已刷新进展");
-    } catch (error) { showError(error); }
-    finally { state.pollBusy = false; }
+    } catch (error) { showError(error, () => refresh({ manual: true }), "刷新进展未完成"); }
+    finally {
+      state.pollBusy = false;
+      if (state.manualRefreshPending) {
+        state.manualRefreshPending = false;
+        refresh({ manual: true });
+      }
+    }
   }
 
   async function start() {
@@ -454,5 +591,5 @@
   window.addEventListener("beforeunload", () => clearInterval(polling));
   window.addEventListener("pywebviewready", start);
   if (token || (window.pywebview && window.pywebview.api)) start();
-  else setTimeout(() => { if (!state.started) showError(new Error("正在连接桌面窗口；若此页面单独打开，请从 HandoffDesk 重新启动。")); }, 8000);
+  else setTimeout(() => { if (!state.started) showError(Object.assign(new Error("正在连接桌面窗口；若此页面单独打开，请从 HandoffDesk 重新启动。"), { category: "connection" })); }, 8000);
 })();
