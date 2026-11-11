@@ -4,8 +4,7 @@ import json
 from pathlib import Path
 import sys
 
-from . import integration
-from .integration import format_doctor
+from . import HOOK_EVENTS
 
 
 COMMANDS = {'connect', 'disconnect', 'doctor', 'integration-hook'}
@@ -27,10 +26,11 @@ def register(subparsers):
     doctor.add_argument('--human', action='store_true', help='用可读中文显示诊断和下一步；默认仍返回 JSON')
     doctor.add_argument('--probe', action='store_true', help='创建临时文件和独立 SQLite 检查本进程权限')
     hook = subparsers.add_parser('integration-hook', help=argparse.SUPPRESS)
-    hook.add_argument('--event', choices=integration.EVENTS, required=True)
+    hook.add_argument('--event', choices=HOOK_EVENTS, required=True)
 
 
 def run(args):
+    from . import integration
     if getattr(args, 'data_dir', None) is not None:
         raise ValueError('Agent 接入使用安装登记中的统一状态目录；请用 --app-dir 指定含 data 的目录，接入命令不支持单独的 --data-dir。')
     if args.command == 'connect':
@@ -60,6 +60,7 @@ def main(argv=None):
     try:
         args = parser.parse_args(argv)
         value = run(args)
+        from .integration import format_doctor
         print(format_doctor(value) if args.command == 'doctor' and args.human else json.dumps(value, ensure_ascii=False, default=str))
         return 2 if args.command == 'doctor' and not value.get('ok') else 0
     except (ValueError, OSError) as exc:

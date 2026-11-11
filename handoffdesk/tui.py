@@ -401,7 +401,7 @@ def create_app(app_dir=None, data_dir=None):
             request = self.detail_request
             try:
                 value = await asyncio.to_thread(model.detail, record_id)
-                text = await asyncio.to_thread(model.export, record_id)
+                text = model.format_export(value)
                 if request != self.detail_request or not self.is_running:
                     return
                 self.current = value

@@ -79,10 +79,10 @@ class Service:
     def open_node_file(self, project_id, node_id, file_id, action='open'):
         return self.node_files.open(project_id, node_id, file_id, action)
 
-    def list_worklines(self, project_id):
+    def list_worklines(self, project_id, *, db=None):
         project = self.registry.get(project_id)
         project_id = project['id']
-        legacy_focus = (self.store.state(project_id)['settings'] or {}).get('focus_job')
+        legacy_focus = (self.store.state(project_id, db=db)['settings'] or {}).get('focus_job')
         lines = {'default': {'id':'default','name':'原有工作线','entry_ids':[], 'focus_id':legacy_focus}}
         for item in project.get('worklines', []):
             if not isinstance(item, dict) or not isinstance(item.get('id'), str) or not WORKLINE_ID.fullmatch(item['id']):
@@ -90,7 +90,7 @@ class Service:
             if item['id'] == 'default' or item['id'] in lines:
                 raise ValueError('登记的工作线编号重复。')
             lines[item['id']] = dict(item, entry_ids=list(item.get('entry_ids', [])))
-        for item in self.store.worklines(project_id):
+        for item in self.store.worklines(project_id, db=db):
             lines[item['id']] = dict(lines.get(item['id'], {}), **item)
         return list(lines.values())
 

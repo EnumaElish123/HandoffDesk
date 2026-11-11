@@ -1,12 +1,7 @@
 """Stable, headless commands for agents and per-machine project roots."""
 import json
-import os
 from pathlib import Path
-import tempfile
 
-from .agent_records import AgentRecords
-from .registry import Registry
-from .paths import app_directory, require_configuration, validate_configuration_writes
 
 COMMANDS = {'record', 'nodes', 'files', 'configure-roots'}
 LIMIT = 1024 * 1024
@@ -56,6 +51,11 @@ def read_payload(path=None, stream=None):
 
 
 def configure_roots(app_dir, path=None, data_dir=None):
+    import os
+    import tempfile
+    from .registry import Registry
+    from .paths import app_directory, require_configuration, validate_configuration_writes
+
     app = app_directory(app_dir)
     require_configuration(app)
     config = (app / 'config').resolve()
@@ -105,5 +105,6 @@ def dispatch(args, service, stream):
                 'roots': service.registry.get(args.project)['roots'],
                 'nodes': service.list_file_nodes(args.project, args.workline)}
     payload = read_payload(args.file, stream)
+    from .agent_records import AgentRecords
     api = AgentRecords(service)
     return api.validate(payload) if args.record_command == 'validate' else api.save(payload)

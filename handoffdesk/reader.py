@@ -85,22 +85,22 @@ class ReaderModel:
                 r.record_id=replace(h.project_id, char(31), ':') ||
                     CASE WHEN instr(h.project_id,char(31))=0 THEN ':default' ELSE '' END || ':' || h.revision
                 GROUP BY h.project_id""")}
-        result = []
-        for project in service.list_projects():
-            lines = service.list_worklines(project['id'])
-            known_lines = {line['id'] for line in lines}
-            for scope in statistics:
-                if scope.startswith(project['id'] + '\x1f'):
-                    historical = scope.split('\x1f', 1)[1]
-                    if historical not in known_lines:
-                        lines.append({'id': historical, 'name': '历史任务', 'entry_ids': []})
-                        known_lines.add(historical)
-            unread = 0
-            for line in lines:
-                scope = project['id'] + ('\x1f' + line['id'] if line['id'] != 'default' else '')
-                line['unread'], line['record_count'], line['latest_recorded_at'] = statistics.get(scope, (0, 0, None))
-                unread += line['unread']
-            result.append(dict(project, worklines=lines, unread=unread))
+            result = []
+            for project in service.list_projects():
+                lines = service.list_worklines(project['id'], db=db)
+                known_lines = {line['id'] for line in lines}
+                for scope in statistics:
+                    if scope.startswith(project['id'] + '\x1f'):
+                        historical = scope.split('\x1f', 1)[1]
+                        if historical not in known_lines:
+                            lines.append({'id': historical, 'name': '历史任务', 'entry_ids': []})
+                            known_lines.add(historical)
+                unread = 0
+                for line in lines:
+                    scope = project['id'] + ('\x1f' + line['id'] if line['id'] != 'default' else '')
+                    line['unread'], line['record_count'], line['latest_recorded_at'] = statistics.get(scope, (0, 0, None))
+                    unread += line['unread']
+                result.append(dict(project, worklines=lines, unread=unread))
         return result
 
     def records(self, project=None, workline=None, limit=50, cursor=None, unread_only=False, query=''):
@@ -137,16 +137,17 @@ class ReaderModel:
         params.extend(known)
         project_key = "CASE WHEN instr(h.project_id,char(31))=0 THEN h.project_id ELSE substr(h.project_id,1,instr(h.project_id,char(31))-1) END"
         line_key = "CASE WHEN instr(h.project_id,char(31))=0 THEN 'default' ELSE substr(h.project_id,instr(h.project_id,char(31))+1) END"
-        sql = """SELECT h.rowid AS position,h.*,r.record_id IS NOT NULL AS is_read,f.payload AS file_state FROM handoffs h
+        sql = """SELECT h.rowid AS position,h.*,r.record_id IS NOT NULL AS is_read,f.payload AS file_state,s.payload AS source_payload FROM handoffs h
             LEFT JOIN reader_reads r ON r.reader_id='local' AND
             r.record_id=replace(h.project_id, char(31), ':') ||
                 CASE WHEN instr(h.project_id,char(31))=0 THEN ':default' ELSE '' END || ':' || h.revision
             LEFT JOIN node_file_state f ON f.project_id=""" + project_key + " AND f.node_id='record:' || " + line_key + " || ':' || h.revision\n" + """            LEFT JOIN snapshots s ON s.id=json_extract(h.payload,'$.source_snapshot_id') AND s.project_id=h.project_id
             WHERE """ + ' AND '.join(conditions) + ' ORDER BY h.rowid DESC LIMIT ?'
+        names = {}
         with service.store.connection() as db:
             if query.strip():
                 needle = self._search_key(query.strip())
-                names = {pid: {line['id']: line['name'] for line in service.list_worklines(pid)}
+                names = {pid: {line['id']: line['name'] for line in service.list_worklines(pid, db=db)}
                          for pid in known}
                 overlays = {(row['project_id'], row['node_id']): json.loads(row['payload'])
                             for row in db.execute('SELECT * FROM node_file_state')}
@@ -181,7 +182,12 @@ class ReaderModel:
 
                 db.create_function('visible_match', 4, visible_match)
             rows = db.execute(sql, [*params, limit + 1]).fetchall()
-        items = [self._record(service, row, include_files=False) for row in rows[:limit]]
+            rows_to_show = rows[:limit]
+            for row in rows_to_show:
+                pid = service.store.scope_identity(row['project_id'])['project_id']
+                if pid not in names:
+                    names[pid] = {line['id']: line['name'] for line in service.list_worklines(pid, db=db)}
+        items = [self._record(service, row, include_files=False, names=names) for row in rows_to_show]
         return {'items': items, 'next_cursor': rows[limit - 1]['position'] if len(rows) > limit else None}
 
     @staticmethod
@@ -189,16 +195,21 @@ class ReaderModel:
         return unicodedata.normalize('NFKC', str(value)).casefold().replace('\\', '/')
 
     @staticmethod
-    def _record(service, row, *, include_files):
+    def _record(service, row, *, include_files, names=None):
         payload = json.loads(row['payload'])
         identity = service.store.scope_identity(row['project_id'])
         project, line_id = identity['project_id'], identity.get('workline_id', 'default')
-        line = next((v for v in service.list_worklines(project) if v['id'] == line_id), {'name': '历史任务'})
+        if names is None:
+            names = {project: {line['id']: line['name'] for line in service.list_worklines(project)}}
+        line_name = names[project].get(line_id, '历史任务')
         node_id = f"record:{line_id}:{row['revision']}"
         files = []
         base = payload.get('file_manifest')
         if base is None:
-            snapshot = service.store.snapshot(payload.get('source_snapshot_id'), row['project_id'])
+            if 'source_payload' in row.keys():
+                snapshot = json.loads(row['source_payload']) if row['source_payload'] else None
+            else:
+                snapshot = service.store.snapshot(payload.get('source_snapshot_id'), row['project_id'])
             base = service.node_files._snapshot_files(project, snapshot)
         associations = (json.loads(row['file_state']) if row['file_state'] else {}) if 'file_state' in row.keys() else service.store.node_file_state(project, node_id)
         manifest = merge_files(base, associations)
@@ -207,7 +218,7 @@ class ReaderModel:
                      for item in manifest]
         return {'id': f"{project}:{line_id}:{row['revision']}", 'project_id': project,
                 'project_name': service.registry.get(project)['name'], 'workline_id': line_id,
-                'workline_name': line['name'], 'title': payload.get('current_task') or '进度记录',
+                'workline_name': line_name, 'title': payload.get('current_task') or '进度记录',
                 'kind': payload.get('event_kind', 'handoff'), 'done': payload.get('last_done', ''),
                 'next_action': payload.get('next_action', ''), 'blockers': payload.get('blockers', []),
                 'verification': payload.get('verification') or {'status': 'not_run', 'summary': '这条历史记录未提供验证说明。'},
@@ -349,7 +360,10 @@ class ReaderModel:
         return f"{date}-{part(value['project_name'], 32)}-{part(value['title'], 96)}-{short_id}.md"
 
     def export(self, record_id):
-        value = self.detail(record_id)
+        return self.format_export(self.detail(record_id))
+
+    @staticmethod
+    def format_export(value):
         verification = value['verification']
         result = [f"# {value['title']}", '', f"项目：{value['project_name']} / {value['workline_name']}",
                   f"记录：{value['id']} · {format_recorded_at(value['recorded_at'])}",

@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 import shutil
 import uuid
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from datetime import datetime, timezone
 
 
@@ -29,10 +29,16 @@ class Store:
             version = db.execute('PRAGMA user_version').fetchone()[0]
             if version > 5:
                 raise ValueError('数据库来自更新版本，请使用相应版本打开，避免降级写入。')
+            # A completed v5 migration is atomic. Readers can open an up-to-date
+            # WAL database while another connection holds the write lock.
+            if version == 5 and db.execute("PRAGMA journal_mode").fetchone()[0] == "wal":
+                return
             db.execute("PRAGMA journal_mode=WAL")
             db.execute("BEGIN IMMEDIATE")
             # Re-read under the write lock: a concurrent opener may have migrated.
             version = db.execute("PRAGMA user_version").fetchone()[0]
+            if version > 5:
+                raise ValueError('数据库来自更新版本，请使用相应版本打开，避免降级写入。')
             if 0 < version < 5:
                 self._backup_before_migration(configuration)
             schema = """
@@ -157,8 +163,8 @@ class Store:
     def _ensure(self, db, project_id):
         db.execute("INSERT OR IGNORE INTO project_state(project_id) VALUES (?)", (project_id,))
 
-    def state(self, project_id):
-        with self.connection() as db:
+    def state(self, project_id, *, db=None):
+        with (self.connection() if db is None else nullcontext(db)) as db:
             row = db.execute("SELECT * FROM project_state WHERE project_id=?", (project_id,)).fetchone()
         if row is None:
             return {"generation": 0, "active_snapshot": None, "last_attempt": None, "settings": {}}
@@ -382,8 +388,8 @@ class Store:
                     return True
         return False
 
-    def worklines(self, project_id):
-        with self.connection() as db:
+    def worklines(self, project_id, *, db=None):
+        with (self.connection() if db is None else nullcontext(db)) as db:
             rows = db.execute('SELECT payload FROM worklines WHERE project_id=? ORDER BY rowid', (project_id,)).fetchall()
         return [json.loads(row[0]) for row in rows]
 

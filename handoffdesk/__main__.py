@@ -1,8 +1,5 @@
 """Friendly reporting also works under pythonw, where stderr is absent."""
-from pathlib import Path
-import argparse
 import sys
-import traceback
 
 
 def run():
@@ -12,6 +9,8 @@ def run():
     windowed = sys.stderr is None or sys.stdout is None
     try:
         if windowed:
+            import argparse
+            from pathlib import Path
             from .registry import Registry
             from .paths import app_directory, configuration_path
             options = argparse.ArgumentParser(add_help=False)
@@ -44,6 +43,7 @@ def run():
             if sys.stderr is not None:
                 print('无法连接桌面显示服务：' + str(exc) + '。请在 Ubuntu 桌面会话启动；服务器请使用记录命令。', file=sys.stderr)
             return 2
+        import traceback
         detail = traceback.format_exc()
         if sys.stderr is not None:
             print(detail, file=sys.stderr)

@@ -2,6 +2,8 @@
 
 ## Unreleased — Linux workflow improvements
 
+- Load command implementations after argument parsing and open existing v5 WAL databases without taking the writer lock.
+- Reuse workline lookups across a feed page and render terminal details from the record already loaded. Exercise the packaged Linux reader in a real pseudo-terminal.
 - Preserve registered state directories on source reinstall, provide owned user command launchers, and report actionable connection diagnostics.
 - Discover tasks by working directory; continue completed sessions in a new turn, explicitly resume paused recording, and keep recovery responses compact with full detail available on demand.
 - Search visible project, task, milestone and attachment content; show tasks and explicit time zones in the terminal reader.

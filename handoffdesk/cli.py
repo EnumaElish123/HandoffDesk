@@ -2,10 +2,7 @@ import argparse
 import json
 from pathlib import Path
 import sys
-import sqlite3
 
-from .service import Service
-from .store import ConflictError
 from . import __version__
 
 
@@ -121,6 +118,8 @@ def main(argv=None):
     agent_session_cli.register(subs)
     integration_cli.register(subs)
     args = parser.parse_args(actual_argv)
+    import sqlite3
+    from .store import ConflictError
     try:
         if args.command == 'agent':
             output(agent_session_cli.run(args))
@@ -129,7 +128,8 @@ def main(argv=None):
             result = integration_cli.run(args)
             if result is not None:
                 if args.command == 'doctor' and getattr(args, 'human', False):
-                    print(integration_cli.format_doctor(result))
+                    from .integration import format_doctor
+                    print(format_doctor(result))
                 else:
                     output(result)
             if args.command == 'doctor' and result and not result.get('ok'):
@@ -161,7 +161,8 @@ def main(argv=None):
             output(add_project(args.app_dir, args.project_id, name=args.name, root=args.root, data_dir=args.data_dir))
             return 0
         if args.command == 'record' and args.record_command == 'schema':
-            output(agent_cli.AgentRecords.schema())
+            from .agent_records import AgentRecords
+            output(AgentRecords.schema())
             return 0
         if args.command == 'configure-roots':
             output(agent_cli.configure_roots(args.app_dir, args.file, args.data_dir))
@@ -170,6 +171,7 @@ def main(argv=None):
             from .reader import ReaderModel
             output(ReaderModel(args.app_dir, args.data_dir).registered_projects())
             return 0
+        from .service import Service
         service = Service(args.app_dir, args.data_dir)
         if command in agent_cli.COMMANDS:
             output(agent_cli.dispatch(args, service, sys.stdin))

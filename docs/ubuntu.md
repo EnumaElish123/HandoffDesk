@@ -86,3 +86,11 @@ python3 scripts/install.py --remove-launcher
 服务器可运行 `python tests/run_tests.py --headless`。发行前仍需在声明支持的目标系统和真实 SSH/tmux 中检查首次安装、升级保留历史、尺寸变化、退出恢复以及剪贴板支持/不支持情况；本机 PTY 通过不等于这些环境全部通过。
 
 更多内容：[安装与 Agent 接入](agent-first.md)、[配置与迁移](configuration.md)、[隐私说明](privacy.md)。
+
+## 分布式文件系统上的启动速度
+
+解释器和依赖安装在共享存储时，打开许多小文件可能拖慢终端和记录命令。在与目标机器兼容的 Linux 构建环境中，安装 `.[tui]` 和 `PyInstaller>=6,<7`，运行 `python scripts/build_portable.py`。将整个 `dist/HandoffDesk` 目录一次复制到用户可执行的快速磁盘，保留其中的 `_internal`。启动包内的 `handoffdesk --app-dir <原状态目录> tui` 即可读取已有项目。
+
+切换前，用同一数据集对比版本查询、出现可操作记录列表和保存 checkpoint 到获得回执的时间。使用独立测试状态验证写入和重试。通过后指向新的可执行文件，并用同一状态目录更新 Agent 接入。原先采用工作规则模式时沿用 `connect codex --skill-only`。
+
+在 Linux 运行 `python scripts/smoke_terminal.py dist/HandoffDesk/handoffdesk --repeat 3` 可测量版本查询、列表可见及回车读到正文的时间，同时验证重复提交和重启读取。可用 `--temp-parent` 指向目标磁盘上已有的私有目录；测试只在其中创建临时项目和状态。若工作库在高延迟共享盘，程序放到本机后，SQLite 访问仍会受存储延迟影响。持续使用同一台服务器时，可用 tmux 保持阅读器打开，分离后再次连接即可继续阅读。

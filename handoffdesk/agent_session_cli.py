@@ -3,8 +3,6 @@ from pathlib import Path
 import sys
 
 from .agent_cli import read_payload
-from .agent_session import AgentSessions
-from .workspace import Workspace
 
 COMMANDS = {'agent'}
 
@@ -83,6 +81,7 @@ add_parsers = register
 
 
 def run(args, stream=None):
+    from .agent_session import AgentSessions
     api = AgentSessions(args.app_dir, args.data_dir)
     command = args.agent_command
     if command == 'begin':
@@ -108,6 +107,7 @@ def run(args, stream=None):
         return api.conclude_turn(args.turn_ref, args.outcome, args.receipt, args.reason)
     if command == 'ack-report':
         return api.ack_report(args.turn_ref, args.receipt, args.evidence_type, args.evidence_ref)
+    from .workspace import Workspace
     workspace = Workspace(args.app_dir, args.data_dir)
     if command == 'inspect':
         return dict(schema_version=1, ok=True, **workspace.inspect(args.cwd))

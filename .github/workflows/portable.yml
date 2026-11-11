@@ -31,6 +31,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           dist/HandoffDesk/handoffdesk --version
+          python scripts/smoke_terminal.py dist/HandoffDesk/handoffdesk
           test -f dist/HandoffDesk/_internal/handoffdesk/integrations/handoffdesk/SKILL.md
           test -f dist/HandoffDesk/_internal/handoffdesk/web/index.html
       - name: Check Windows bundle

@@ -20,10 +20,10 @@ import sys
 import tempfile
 import uuid
 
-from . import __version__
+from . import __version__, HOOK_EVENTS
 
 
-EVENTS = ('SessionStart', 'UserPromptSubmit', 'Stop', 'Interrupt', 'SessionEnd')
+EVENTS = HOOK_EVENTS
 MAX_INPUT = 1024 * 1024
 
 
