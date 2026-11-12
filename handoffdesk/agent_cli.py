@@ -51,8 +51,7 @@ def read_payload(path=None, stream=None):
 
 
 def configure_roots(app_dir, path=None, data_dir=None):
-    import os
-    import tempfile
+    from .bootstrap import configuration_lock, publish_root_mapping
     from .registry import Registry
     from .paths import app_directory, require_configuration, validate_configuration_writes
 
@@ -71,22 +70,11 @@ def configure_roots(app_dir, path=None, data_dir=None):
         return {'schema_version': 1, 'projects': {p['id']: p['roots'] for p in base['projects']}}
     payload = read_payload(path)
     registry = Registry(config / 'projects.json', roots_override=payload)
-    encoded = (json.dumps(payload, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
-    if len(encoded) > 262144:
-        raise ValueError('保存后的本机目录配置不能超过 256 KiB。')
-    # Validate every root before atomically replacing the local-only mapping.
+    # Check the proposed ownership before creating a lock in this directory.
     validate_configuration_writes(app, registry.projects, data_dir)
-    pending = None
-    try:
-        with tempfile.NamedTemporaryFile(mode='wb', dir=config,
-                                         prefix='.roots-', suffix='.tmp', delete=False) as handle:
-            pending = Path(handle.name)
-            handle.write(encoded)
-        os.replace(pending, target)
-        pending = None
-    finally:
-        if pending is not None:
-            pending.unlink(missing_ok=True)
+    with configuration_lock(app):
+        # Registration or relocation could have changed which roots are effective.
+        registry = publish_root_mapping(app, payload, data_dir)
     return {'schema_version': 1, 'saved': True, 'path': str(target),
             'projects': {p['id']: p['roots'] for p in registry.projects}}
 

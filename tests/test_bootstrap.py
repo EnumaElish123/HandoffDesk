@@ -1,4 +1,5 @@
 """Onboarding uses isolated state and preserves registered project files."""
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout, redirect_stderr
 from io import StringIO
 import json
@@ -7,11 +8,15 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
 from handoffdesk.bootstrap import initialize, add_project
 from handoffdesk.cli import main
+from handoffdesk.agent_cli import configure_roots
+from handoffdesk.registry import Registry
+from handoffdesk.workspace import Workspace
 from handoffdesk.paths import app_directory
 from handoffdesk.service import Service
 
@@ -87,16 +92,151 @@ class BootstrapTests(unittest.TestCase):
             initialize(self.app, project_id='sample', root=self.project, data_dir=self.project / 'tool-data')
         self.assertEqual(sorted(p.name for p in self.project.iterdir()), ['README.md'])
 
-    def test_add_rejects_overlapping_roots_and_leaves_original_unchanged(self):
+    @patch('handoffdesk.workspace._git_identity', return_value=None)
+    def test_explicit_nested_registration_in_both_orders(self, _git_identity):
+        child = self.project / 'nested'
+        runs = child / 'runs'
+        runs.mkdir(parents=True)
+        roots = {'parent': self.project, 'child': child}
+        for first, second in [('parent', 'child'), ('child', 'parent')]:
+            with self.subTest(first=first):
+                app = self.base / first
+                workspace = Workspace(app)
+                initialize(app, project_id=first, root=roots[first])
+                if first == 'parent':
+                    inherited = workspace.connect(runs)
+                    self.assertEqual(inherited['project']['id'], 'parent')
+                    self.assertFalse(inherited['added'])
+                else:
+                    with self.assertRaisesRegex(ValueError, '包含已登记项目'):
+                        workspace.connect(self.project)
+                add_project(app, second, root=roots[second])
+                self.assertEqual(workspace.inspect(self.project)['project']['id'], 'parent')
+                self.assertEqual(workspace.inspect(runs)['project']['id'], 'child')
+
+    def test_add_rejects_duplicate_canonical_or_unsafe_root_without_changes(self):
         initialize(self.app, project_id='sample', root=self.project)
-        nested = self.project / 'nested'; nested.mkdir()
+        nested = self.project / 'nested'
+        nested.mkdir()
         config = self.app / 'config/projects.json'
         before = config.read_bytes()
-        for project_id, root in [('other', self.project), ('other', nested), ('other', self.base)]:
-            with self.subTest(root=root):
-                with self.assertRaises(ValueError):
-                    add_project(self.app, project_id, root=root)
-                self.assertEqual(config.read_bytes(), before)
+        for root in [self.project, nested / '..', self.base, self.app / 'config']:
+            with self.subTest(root=root), self.assertRaises(ValueError):
+                add_project(self.app, 'other', root=root)
+            self.assertEqual(config.read_bytes(), before)
+
+    def test_named_root_mapping_and_relocation_share_effective_ownership(self):
+        child = self.project / 'child'
+        other = self.base / 'other'
+        child.mkdir()
+        other.mkdir()
+        initialize(self.app, project_id='parent', root=self.project)
+        add_project(self.app, 'child', root=other)
+        config = self.app / 'config/projects.json'
+        base = json.loads(config.read_text(encoding='utf-8'))
+        base['projects'][1]['roots']['docs'] = str(other / 'docs')
+        config.write_text(json.dumps(base), encoding='utf-8')
+        workspace = Workspace(self.app)
+        workspace.relocate('child', child)
+        self.assertEqual(workspace.inspect(child)['project']['id'], 'child')
+        with self.assertRaisesRegex(ValueError, '同一根目录'):
+            workspace.relocate('parent', child)
+        self.assertEqual(workspace.inspect(self.project)['project']['id'], 'parent')
+
+        candidate = self.base / 'roots.input.json'
+        target = config.with_name('roots.local.json')
+        mapped = {'schema_version': 1, 'projects': {'child': {'docs': str(self.project / 'docs')}}}
+        (self.project / 'docs').mkdir()
+        candidate.write_text(json.dumps(mapped), encoding='utf-8')
+        configure_roots(self.app, candidate)
+        self.assertEqual(workspace.inspect(self.project / 'docs')['project']['id'], 'child')
+        original = target.read_bytes()
+        with self.assertRaisesRegex(ValueError, '同一根目录'):
+            workspace.relocate('parent', self.project / 'docs')
+        self.assertEqual(target.read_bytes(), original)
+        mapped['projects']['child']['docs'] = str(child / '..')
+        candidate.write_text(json.dumps(mapped), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, '同一根目录'):
+            configure_roots(self.app, candidate)
+        self.assertEqual(target.read_bytes(), original)
+        # A previously written conflicting local mapping is rejected on load too.
+        target.write_bytes(candidate.read_bytes())
+        with self.assertRaisesRegex(ValueError, '同一根目录'):
+            Registry(config)
+        mapped['projects']['child']['docs'] = str(other / 'docs')
+        candidate.write_text(json.dumps(mapped), encoding='utf-8')
+        configure_roots(self.app, candidate)
+        self.assertEqual(Registry(config).get('child')['roots']['docs'], str(other / 'docs'))
+
+    def test_new_business_bindings_cannot_be_inside_state(self):
+        hidden = self.app / 'private'
+        hidden.mkdir(parents=True)
+        with self.assertRaisesRegex(ValueError, '状态目录'):
+            initialize(self.app, project_id='private', root=hidden)
+        initialize(self.app, project_id='outside', root=self.project)
+        with self.assertRaisesRegex(ValueError, '状态目录'):
+            add_project(self.app, 'private', root=hidden)
+        with self.assertRaisesRegex(ValueError, '状态目录'):
+            Workspace(self.app).relocate('outside', hidden)
+        candidate = self.base / 'roots.input.json'
+        candidate.write_text(json.dumps({'schema_version': 1, 'projects': {
+            'outside': {'main': str(hidden)}}}), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, '状态目录'):
+            configure_roots(self.app, candidate)
+        self.assertFalse((self.app / 'config/roots.local.json').exists())
+        self.assertEqual(Workspace(self.app).inspect(self.project)['project']['id'], 'outside')
+
+    def test_builtin_example_can_restore_its_original_mapping(self):
+        initialize(self.app)
+        original = self.app / 'examples/demo-project'
+        candidate = self.base / 'roots.input.json'
+        for root in (self.project, original):
+            candidate.write_text(json.dumps({'schema_version': 1, 'projects': {
+                'demo': {'main': str(root)}}}), encoding='utf-8')
+            self.assertEqual(configure_roots(self.app, candidate)['projects']['demo']['main'], str(root))
+        self.assertEqual(Workspace(self.app).inspect(original)['project']['id'], 'demo')
+
+    def test_mapping_rechecks_ownership_under_registration_lock(self):
+        from handoffdesk.bootstrap import _publish, configuration_lock
+        from handoffdesk.paths import validate_configuration_writes
+
+        initialize(self.app, project_id='first', root=self.project)
+        claimed = self.base / 'claimed'
+        claimed.mkdir()
+        candidate = self.base / 'roots.input.json'
+        candidate.write_text(json.dumps({'schema_version': 1, 'projects': {
+            'first': {'main': str(claimed)}}}), encoding='utf-8')
+        config = self.app / 'config/projects.json'
+        preflight = threading.Event()
+
+        def checked(*args):
+            validate_configuration_writes(*args)
+            preflight.set()
+
+        with ThreadPoolExecutor(max_workers=1) as pool, patch(
+                'handoffdesk.paths.validate_configuration_writes', side_effect=checked):
+            with configuration_lock(self.app):
+                update = pool.submit(configure_roots, self.app, candidate)
+                self.assertTrue(preflight.wait(5))
+                projects = json.loads(config.read_text(encoding='utf-8'))
+                projects['projects'].append({'id': 'second', 'name': 'second', 'roots': {'main': str(claimed)}})
+                _publish(self.app, config, projects, create=False)
+            with self.assertRaisesRegex(ValueError, '同一根目录'):
+                update.result(timeout=5)
+        self.assertFalse(config.with_name('roots.local.json').exists())
+        self.assertEqual(Workspace(self.app).inspect(claimed)['project']['id'], 'second')
+
+    @unittest.skipIf(os.name == 'nt', 'Symlink privileges vary on Windows')
+    def test_symlink_alias_cannot_occupy_another_projects_root(self):
+        initialize(self.app, project_id='parent', root=self.project)
+        child = self.project / 'child'
+        child.mkdir()
+        alias = self.base / 'alias'
+        alias.symlink_to(child, target_is_directory=True)
+        add_project(self.app, 'child', root=alias)
+        self.assertEqual(Workspace(self.app).inspect(alias)['project']['id'], 'child')
+        with self.assertRaisesRegex(ValueError, '同一根目录'):
+            add_project(self.app, 'duplicate', root=child)
 
     def test_missing_configuration_has_actionable_message(self):
         code, _, errors = self.cli('show', 'sample')
@@ -167,6 +307,9 @@ class BootstrapTests(unittest.TestCase):
     def test_headless_schema_and_init_do_not_import_tk_or_write_package(self):
         code = """import json, sys
 from handoffdesk.cli import main
+from handoffdesk.agent_cli import configure_roots
+from handoffdesk.registry import Registry
+from handoffdesk.workspace import Workspace
 assert main(['--app-dir', sys.argv[1], 'record', 'schema']) == 0
 assert 'tkinter' not in sys.modules
 assert main(['--app-dir', sys.argv[1], 'init']) == 0

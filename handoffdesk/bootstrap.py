@@ -7,11 +7,11 @@ import tempfile
 import time
 from contextlib import contextmanager
 
-from .paths import _is_within, _resolve_path, app_directory, configuration_path, require_configuration, validate_configuration_writes
-from .registry import Registry
+from .paths import _comparison_path, _is_within, _resolve_path, app_directory, configuration_path, require_configuration, validate_configuration_writes
+from .registry import Registry, RegistryError
 
 
-def _project(app, project_id, name, root, data_dir=None):
+def _project(app, project_id, name, root, data_dir=None, *, example=False):
     if not isinstance(project_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', project_id):
         raise ValueError('项目 ID 只能含字母、数字、下划线和连字符。')
     name = name if name is not None else project_id
@@ -26,6 +26,8 @@ def _project(app, project_id, name, root, data_dir=None):
     project = {'id': project_id, 'name': name.strip(), 'roots': {'main': str(path)},
                'adapters': ['registered_files', 'git_readonly'], 'sources': [], 'entries': []}
     validate_configuration_writes(app, [project], data_dir)
+    if not example and _is_within(path, app):
+        raise ValueError('业务根目录不能放在 HandoffDesk 状态目录内。')
     return project
 
 
@@ -98,6 +100,57 @@ def _publish(app, target, value, *, create):
             pending.unlink(missing_ok=True)
 
 
+def _state_bindings(app, projects):
+    bindings = set()
+    for project in projects:
+        for key, value in project['roots'].items():
+            root = _comparison_path(_resolve_path(value))
+            if _is_within(root, app):
+                bindings.add((project['id'], key, root))
+    return bindings
+
+
+def publish_root_mapping(app, value, data_dir=None):
+    """Caller holds configuration_lock. Validate all effective roots before replacing the mapping."""
+    config = configuration_path(app)
+    target = config.with_name('roots.local.json')
+    if not _is_within(_resolve_path(target), config.parent):
+        raise ValueError('本机目录映射不能重定向到配置目录之外。')
+    encoded = (json.dumps(value, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
+    if len(encoded) > 262144:
+        raise ValueError('保存后的本机目录配置不能超过 256 KiB。')
+    registry = Registry(config, roots_override=value)
+    validate_configuration_writes(app, registry.projects, data_dir)
+    inside = _state_bindings(app, registry.projects)
+    if inside:
+        # Older installations may already have local business roots inside state.
+        # Preserve unchanged bindings and the bundled demo, but never add a new one.
+        try:
+            previous = _state_bindings(app, Registry(config).projects)
+        except RegistryError:
+            # configure-roots also repairs foreign or conflicting original roots.
+            previous = set()
+        new = inside - previous
+        for project in registry.projects:
+            if project['id'] == 'demo' and any(source['id'] == 'demo.readme' for source in project.get('sources', [])):
+                new.discard(('demo', 'main', _comparison_path(app / 'examples' / 'demo-project')))
+        if new:
+            raise ValueError('业务根目录不能放在 HandoffDesk 状态目录内。')
+    pending = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='wb', dir=config.parent,
+                                         prefix='.roots-', suffix='.tmp', delete=False) as handle:
+            pending = Path(handle.name)
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(pending, target)
+    finally:
+        if pending is not None:
+            pending.unlink(missing_ok=True)
+    return registry
+
+
 def _write(app, target, value, *, create):
     with configuration_lock(app):
         if not create and '_expected_bytes' in value:
@@ -119,14 +172,14 @@ def initialize(app_dir=None, *, project_id=None, name=None, root=None, data_dir=
             raise ValueError('指定项目编号或名称时必须同时提供 --root。')
         project_id, name = 'demo', 'Demo project'
         demo = (app / 'examples' / 'demo-project').resolve()
-        if not demo.is_relative_to(app):
-            raise ValueError('示例目录不能重定向到状态目录之外。')
+        if _comparison_path(demo) != _comparison_path(app / 'examples' / 'demo-project'):
+            raise ValueError('内置示例目录不能重定向。')
         demo.mkdir(parents=True, exist_ok=True)
         readme = demo / 'README.md'
         if not readme.exists():
             with readme.open('x', encoding='utf-8') as handle:
                 handle.write('# Demo project\n\nThis is a local HandoffDesk example. Add your own project with `handoffdesk project add`.\n')
-        project = _project(app, project_id, name, demo, data_dir)
+        project = _project(app, project_id, name, demo, data_dir, example=True)
         project['sources'] = [{'id': 'demo.readme', 'root': 'main', 'path': 'README.md', 'format': 'markdown', 'purpose': 'project_overview'}]
         project['entries'] = [{'id': 'readme', 'type': 'open_source', 'source_id': 'demo.readme', 'label': 'Demo README'}]
     else:
@@ -150,12 +203,6 @@ def add_project(app_dir, project_id, *, name=None, root, data_dir=None):
         validate_configuration_writes(app, registry.projects, data_dir)
         if any(item['id'] == project_id for item in registry.projects):
             raise ValueError('项目 ID 已存在，请使用不同编号。')
-        new_root = Path(project['roots']['main'])
-        for existing in registry.projects:
-            for value in existing['roots'].values():
-                known = Path(value).resolve()
-                if new_root.is_relative_to(known) or known.is_relative_to(new_root):
-                    raise ValueError('项目根目录与已登记项目重叠，请选择独立目录。')
         value = json.loads(original.decode('utf-8-sig'))
         value['projects'].append(project)
         _publish(app, target, value, create=False)

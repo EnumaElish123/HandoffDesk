@@ -49,6 +49,10 @@ python -m handoffdesk project add beta --name "Another project" --root /absolute
 
 项目 ID 使用字母、数字、下划线或连字符，应保持长期稳定。更改显示名称与更改 ID 的影响不同；历史以 ID 归属，不要通过随意改 ID 来“重命名”已有记录。
 
+父目录和子目录可以按任意顺序登记在同一状态库。例如，已登记 `/work/alpha` 后，运行 `project add research --name "Research" --root /work/alpha/research` 即可独立管理子项目。普通进入尚未登记的子目录时，Agent 继续使用父项目。显式登记后，在 `/work/alpha/research/runs` 启动 Agent 或新的 TUI，当前项目都是 `research`。两个项目可以有同名任务，记录按项目 ID 分开，全局进展可以同时查看。
+
+登记、`agent relocate` 和 `configure-roots` 均按实际解析后的目录检查归属。每个目录只能归属于一个项目，符号链接指向同一目录时也适用。
+
 ## 明确登记来源和入口
 
 编辑状态目录的 `config/projects.json` 前关闭相关窗口并备份。模板见 [config/projects.example.json](../config/projects.example.json)。模板中的 `/absolute/path/to/your-project` 不适用于直接运行；首次使用优先通过 `init` 生成配置，再参照下面添加来源。

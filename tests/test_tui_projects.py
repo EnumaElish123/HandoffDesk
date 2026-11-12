@@ -3,6 +3,7 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from handoffdesk.reader import ReaderModel
 
@@ -81,10 +82,6 @@ class ProjectNavigationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(created)
         self.assertEqual(same['id'], p['id'])
         self.assertEqual(same['name'], '样例')
-        nested = self.project / '子目录'
-        nested.mkdir()
-        with self.assertRaisesRegex(ValueError, '重叠'):
-            _register(self.model, str(nested), '子项目')
         rid = p['id'] + ':default:1'
         save_reading_position(self.model, dict(id=rid, project_id=p['id'], workline_id='default', title='上次阅读'))
         async with self.app.run_test() as pilot:
@@ -93,6 +90,57 @@ class ProjectNavigationTests(unittest.IsolatedAsyncioTestCase):
             rows.highlighted = rows.get_option_index('resume')
             await pilot.press('enter')
             self.assertEqual(self.app.opened, (p['id'], 'default', rid, False))
+
+    async def test_add_child_from_inherited_directory(self):
+        await self.exercise_nested_registration(parent_first=True)
+
+    async def test_add_parent_around_existing_child(self):
+        await self.exercise_nested_registration(parent_first=False)
+
+    async def exercise_nested_registration(self, *, parent_first):
+        from handoffdesk.tui_projects import _register
+        from textual.widgets import Input, OptionList
+
+        child = self.project / '子项目'
+        runs = child / 'runs'
+        runs.mkdir(parents=True)
+        first, second = (self.project, child) if parent_first else (child, self.project)
+        first_project, _ = _register(self.model, str(first), first.name)
+        with patch('handoffdesk.tui_projects.Path.cwd', return_value=runs):
+            async with self.app.run_test(size=(80, 24)) as pilot:
+                await pilot.pause()
+                rows = self.app.screen.query_one('#nav-list', OptionList)
+                self.assertIn('当前目录', str(rows.get_option('project:' + first_project['id']).prompt))
+                await pilot.press('a')
+                self.app.screen.query_one('#project-root', Input).value = str(second)
+                await pilot.press('enter', 'enter')
+                await pilot.pause()
+                new_id = self.app.screen.project_id
+                self.assertNotEqual(new_id, first_project['id'])
+                self.assertIn(second.name, str(self.app.screen.query_one('#nav-title').render()))
+                await pilot.press('escape')
+                await pilot.pause()
+                rows = self.app.screen.query_one('#nav-list', OptionList)
+                projects = [opt for opt in rows.options if opt.id.startswith('project:')]
+                self.assertEqual({opt.id for opt in projects}, {'project:' + first_project['id'], 'project:' + new_id})
+                current = [opt.id for opt in projects if '当前目录' in str(opt.prompt)]
+                self.assertEqual(current, ['project:' + (new_id if parent_first else first_project['id'])])
+
+    async def test_launch_inside_nested_registration_focuses_child(self):
+        from handoffdesk.tui_projects import _register
+        from textual.widgets import OptionList
+        child = self.project / '子项目'
+        runs = child / 'runs'
+        runs.mkdir(parents=True)
+        _register(self.model, str(self.project), '父项目')
+        registered, _ = _register(self.model, str(child), '子项目')
+        with patch('handoffdesk.tui_projects.Path.cwd', return_value=runs):
+            async with self.app.run_test() as pilot:
+                await pilot.pause()
+                rows = self.app.screen.query_one('#nav-list', OptionList)
+                self.assertEqual(rows.get_option_at_index(rows.highlighted).id, 'project:' + registered['id'])
+                await pilot.press('enter')
+                self.assertEqual(self.app.screen.project_id, registered['id'])
 
     def test_concurrent_registration_reuses_one_project(self):
         from concurrent.futures import ThreadPoolExecutor

@@ -217,10 +217,11 @@ class V02ServiceTests(unittest.TestCase):
         self.assertEqual([field['field'] for field in changes[0]['fields']],['读取状态','内容'])
 
     def test_focus_options_expose_readonly_metadata(self):
-        project = {'id':'rvc','name':'RVC','roots':{'main':str(self.source),'applio':str(self.source)},'sources':[],'entries':[]}
+        rvc = self.base / 'rvc'
+        project = {'id':'rvc','name':'RVC','roots':{'main':str(rvc),'applio':str(rvc)},'sources':[],'entries':[]}
         self.config['projects'].append(project)
         self.config_path.write_text(json.dumps(self.config),encoding='utf-8')
-        folder = self.source/'workflows/jobs/20261022_train'
+        folder = rvc/'workflows/jobs/20261022_train'
         folder.mkdir(parents=True)
         (folder/'job.json').write_text('{"id":"20261022_train","kind":"train","voice_name":"sample","created_at":"2026-10-22"}')
         (folder/'state.json').write_text('{"status":"completed","updated_at":"2026-10-22T12:00:00+08:00"}')

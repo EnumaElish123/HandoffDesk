@@ -17,7 +17,8 @@ from textual.widgets.option_list import Option
 from .bootstrap import add_project, initialize
 from .paths import app_directory, configuration_path
 from .reader import format_recorded_at, safe_text
-from .registry import Registry
+from .registry import Registry, match_project_root
+from .workspace import Workspace, WorkspaceError
 
 
 def _directory(model):
@@ -31,8 +32,8 @@ def _roots(project):
 
 
 def _same_directory(projects, path):
-    return next((project for project in projects.values()
-                 if any(Path(root).resolve() == path for root in _roots(project))), None)
+    match = match_project_root(projects.values(), path)
+    return match[0] if match and match[1] == path else None
 
 
 def _register(model, folder, name):
@@ -215,6 +216,7 @@ def make_project_screens(model):
             super().__init__()
             self.project_id = project_id
             self.directory = {}
+            self.current_project_id = None
             self.statistics = {}
             self.latest_titles = {}
             self.position = None
@@ -269,6 +271,17 @@ def make_project_screens(model):
                         self.action_back()
                         return
                     self.project_id = None
+                self.current_project_id = None
+                if not self.project_id and self.directory:
+                    workspace = Workspace(model.app_dir, model.data_dir)
+                    try:
+                        location = await asyncio.to_thread(workspace.inspect, Path.cwd(),
+                                                           projects=self.directory.values(), include_checkout=False)
+                    except WorkspaceError as exc:
+                        self.notify(safe_text(exc), severity='warning')
+                    else:
+                        if location['connected']:
+                            self.current_project_id = location['project']['id']
                 self.render_choices()
                 if self.directory:
                     projects = await asyncio.to_thread(model.projects)
@@ -322,7 +335,6 @@ def make_project_screens(model):
                     add('task:' + line['id'], label)
             else:
                 names = Counter(p['name'] for p in self.directory.values())
-                cwd = Path.cwd()
                 def latest(pid):
                     lines = self.statistics.get(pid, {}).get('worklines', [])
                     return max((line.get('latest_recorded_at') or '' for line in lines), default='')
@@ -332,7 +344,7 @@ def make_project_screens(model):
                     label = project['name']
                     if names[label] > 1:
                         label += ' · ' + roots[0]
-                    if any(cwd.is_relative_to(Path(root)) for root in roots):
+                    if pid == self.current_project_id:
                         label += ' · 当前目录'
                     if pid in self.statistics:
                         stamp = latest(pid)
@@ -347,6 +359,8 @@ def make_project_screens(model):
             listing.clear_options().add_options(options)
             keys = [o.id for o in options]
             key = self.restore_id or selected
+            if key is None and self.project_id is None and self.current_project_id is not None:
+                key = 'project:' + self.current_project_id
             listing.highlighted = keys.index(key) if key in keys else 0
             if self.restore_id in keys:
                 self.restore_id = None

@@ -261,10 +261,11 @@ class V03ServiceTests(unittest.TestCase):
             self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0],5)
 
     def test_rvc_job_switch_returns_to_its_own_plan(self):
-        project = {'id':'rvc','name':'RVC','roots':{'main':str(self.source),'applio':str(self.source)},'sources':[],'entries':[]}
+        rvc = self.base / 'rvc'
+        project = {'id':'rvc','name':'RVC','roots':{'main':str(rvc),'applio':str(rvc)},'sources':[],'entries':[]}
         self.config['projects'].append(project)
         for job in ('20261022_first','20261022_second'):
-            folder = self.source/'workflows/jobs'/job
+            folder = rvc/'workflows/jobs'/job
             folder.mkdir(parents=True)
             (folder/'job.json').write_text(json.dumps({'kind':'train','voice_name':'sample','created_at':'2026-10-22'}))
             (folder/'state.json').write_text('{"status":"completed","updated_at":"2026-10-22"}')

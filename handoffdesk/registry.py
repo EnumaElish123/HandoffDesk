@@ -7,9 +7,30 @@ import os
 import re
 from pathlib import Path, PureWindowsPath
 
+from .paths import _comparison_path, _resolve_path
+
 
 class RegistryError(ValueError):
     pass
+
+
+class ProjectRootConflict(RegistryError):
+    code = 'project_ambiguous'
+
+
+def match_project_root(projects, cwd):
+    """Return the most specific effective root containing cwd, if any."""
+    directory = _comparison_path(_resolve_path(cwd))
+    best = None
+    depth = 0
+    for project in projects:
+        for value in project['roots'].values():
+            root = _resolve_path(value)
+            key = _comparison_path(root)
+            if len(key.parts) > depth and directory.is_relative_to(key):
+                best = project, root
+                depth = len(key.parts)
+    return best
 
 
 class Registry:
@@ -64,6 +85,7 @@ class Registry:
         self.roots_override = roots_override
         self.fingerprint = hashlib.sha256(data + (b'\0roots.local\0' + override_bytes if override_bytes else b'')).hexdigest()
         ids = set()
+        owners = {}
         for project in self.projects:
             if not isinstance(project, dict):
                 raise RegistryError("项目登记项必须为对象")
@@ -81,6 +103,13 @@ class Registry:
             for root in roots.values():
                 if not isinstance(root, str) or not Path(root).is_absolute():
                     raise RegistryError(f"{project_id} 的根目录不适用于当前系统。请先通过 configure-roots 配置本机目录（见 docs/ubuntu.md），或设置 config/roots.local.json。")
+                try:
+                    canonical = _comparison_path(_resolve_path(root))
+                except (OSError, RuntimeError, ValueError) as exc:
+                    raise RegistryError(f"{project_id} 的根目录无法解析：{root}") from exc
+                owner = owners.setdefault(canonical, project_id)
+                if owner != project_id:
+                    raise ProjectRootConflict(f"项目 {owner} 和 {project_id} 不能使用同一根目录：{canonical}")
             source_ids = set()
             for source in project.get("sources", []):
                 source_id = source.get("id")

@@ -33,9 +33,12 @@ class DesktopV05Tests(unittest.TestCase):
         self.guide.write_text('只用于回归验证的执行计划。', encoding='utf-8')
         self.weight = self.source / 'model.pth'
         self.weight.write_bytes(b'fixture, not an executable or model')
+        self.rvc = self.base / 'rvc'
+        self.rvc.mkdir()
+        (self.rvc / 'state.json').write_bytes(self.state_file.read_bytes())
         self.job_ids = ('20261023_120000_aaaaaaaaaa', '20261023_120100_bbbbbbbbbb')
         for job_id, kind, voice in zip(self.job_ids, ('train', 'infer'), ('试听甲', '试听乙')):
-            folder = self.source / 'workflows' / 'jobs' / job_id
+            folder = self.rvc / 'workflows' / 'jobs' / job_id
             folder.mkdir(parents=True)
             (folder / 'job.json').write_text(json.dumps({
                 'kind': kind, 'voice_name': voice, 'created_at': '2026-10-23T12:00:00'}), encoding='utf-8')
@@ -54,7 +57,7 @@ class DesktopV05Tests(unittest.TestCase):
              'roots': {'main': str(self.source)}, 'sources': sources, 'entries': entries,
              'worklines': [{'id': 'audit', 'name': '证据核验', 'entry_ids': ['guide']}]},
             {'id': 'rvc', 'name': 'RVC 音色项目',
-             'roots': {'main': str(self.source), 'applio': str(self.source)},
+             'roots': {'main': str(self.rvc), 'applio': str(self.rvc)},
              'sources': sources[:1], 'entries': entries[:1]}]}
         (self.appdir / 'config' / 'projects.json').write_text(json.dumps(config), encoding='utf-8')
         self.service = Service(self.appdir)
@@ -209,7 +212,7 @@ class DesktopV05Tests(unittest.TestCase):
     def test_rvc_filter_focus_and_background_refresh_use_real_task_metadata(self):
         self.assertEqual(display_value('infer'), '换声')
         self.assertEqual(display_value('inference'), '换声')
-        baseline = {p: p.read_bytes() for p in (self.source / 'workflows').rglob('*.json')}
+        baseline = {p: p.read_bytes() for p in (self.rvc / 'workflows').rglob('*.json')}
         self.app.search_var.set('RVC')
         self.root.update()
         self.assertFalse(self.app.project_buttons['research'].winfo_manager())
@@ -228,7 +231,7 @@ class DesktopV05Tests(unittest.TestCase):
         self.assertEqual(state['workline']['id'], 'job-' + self.job_ids[1])
         self.assertTrue(state['last_attempt']['usable'])
         self.assertIsNone(state['handoff'])
-        self.assertEqual(baseline, {p: p.read_bytes() for p in (self.source / 'workflows').rglob('*.json')})
+        self.assertEqual(baseline, {p: p.read_bytes() for p in (self.rvc / 'workflows').rglob('*.json')})
 
     def test_segmented_navigation_keyboard_fast_switches_and_resize_stay_in_sync(self):
         for size in ('840x620', '1080x760'):

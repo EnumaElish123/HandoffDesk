@@ -102,10 +102,11 @@ class LocalRootMappingTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix='本机目录 ', dir=Path(__file__).parent)
         self.addCleanup(self.temporary.cleanup)
-        self.app = Path(self.temporary.name)
+        self.app = Path(self.temporary.name) / 'state'
+        self.app.mkdir()
         self.config_dir = self.app / 'config'; self.config_dir.mkdir()
         self.old_root = self.app / '旧业务'; self.old_root.mkdir()
-        self.new_root = self.app / '新业务 中文'; self.new_root.mkdir()
+        self.new_root = self.app.parent / '新业务 中文'; self.new_root.mkdir()
         self.config = self.config_dir / 'projects.json'
         self.payload = {'schema_version': 1, 'projects': [{'id': 'alpha', 'name': '项目', 'roots': {'main': str(self.old_root)},
             'sources': [{'id': 'notes', 'root': 'main', 'path': '记录.txt', 'format': 'text'}], 'entries': []}]}

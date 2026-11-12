@@ -27,6 +27,9 @@ class DesktopV04Tests(unittest.TestCase):
         self.filename = '中文原始证据文件名包含实验版本与来源核验信息' * 2 + '.json'
         self.source = self.project / self.filename
         self.source.write_text('{"status":"paused"}', encoding='utf-8')
+        rvc = base / 'rvc'
+        rvc.mkdir()
+        (rvc / self.filename).write_bytes(self.source.read_bytes())
         appdir = base / 'app'
         (appdir / 'config').mkdir(parents=True)
         sources = [{'id': 'source-' + str(i), 'path': self.filename, 'format': 'json',
@@ -37,7 +40,7 @@ class DesktopV04Tests(unittest.TestCase):
             {'id': 'research', 'name': self.long_project, 'roots': {'main': str(self.project)},
              'worklines': [{'id': 'review', 'name': self.long_workline, 'entry_ids': ['material-0']}],
              'sources': sources, 'entries': entries},
-            {'id': 'rvc', 'name': 'RVC 中文音色研究', 'roots': {'main': str(self.project)},
+            {'id': 'rvc', 'name': 'RVC 中文音色研究', 'roots': {'main': str(rvc)},
              'sources': [sources[0]], 'entries': [entries[0]]}]}
         (appdir / 'config' / 'projects.json').write_text(json.dumps(config), encoding='utf-8')
         self.service = Service(appdir)

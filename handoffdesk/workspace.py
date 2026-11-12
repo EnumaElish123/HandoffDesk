@@ -2,15 +2,13 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 import subprocess
-import tempfile
 import uuid
 
-from .bootstrap import _project, _publish, configuration_lock
-from .paths import app_directory, configuration_path, validate_configuration_writes
-from .registry import Registry
+from .bootstrap import _project, _publish, configuration_lock, publish_root_mapping
+from .paths import _is_within, _resolve_path, app_directory, configuration_path, validate_configuration_writes
+from .registry import Registry, match_project_root
 
 
 class WorkspaceError(ValueError):
@@ -47,25 +45,17 @@ class Workspace:
         self.app_dir = app_directory(app_dir)
         self.data_dir = data_dir
 
-    def inspect(self, cwd):
+    def inspect(self, cwd, *, projects=None, include_checkout=True):
         cwd = _directory(cwd)
-        target = configuration_path(self.app_dir)
-        projects = Registry(target).projects if target.exists() else []
-        matches = []
-        for project in projects:
-            for value in project['roots'].values():
-                root = Path(value).resolve()
-                if cwd.is_relative_to(root):
-                    matches.append((len(root.parts), project, root))
-        identity = _git_identity(cwd)
-        if matches:
-            longest = max(item[0] for item in matches)
-            closest = [item for item in matches if item[0] == longest]
-            if len({item[1]['id'] for item in closest}) != 1:
-                raise WorkspaceError('project_ambiguous', '工作目录同时属于多个项目，请明确修正根目录映射。')
-            _, project, root = closest[0]
+        if projects is None:
+            target = configuration_path(self.app_dir)
+            projects = Registry(target).projects if target.exists() else []
+        match = match_project_root(projects, cwd)
+        if match:
+            project, root = match
             return {'connected': True, 'project': project, 'cwd': str(cwd), 'root': str(root),
-                    'checkout': identity, 'match': 'registered_root'}
+                    'checkout': _git_identity(cwd) if include_checkout else None, 'match': 'registered_root'}
+        identity = _git_identity(cwd)
         if identity:
             peers = []
             for project in projects:
@@ -115,7 +105,7 @@ class Workspace:
                 registry = Registry(target)
                 validate_configuration_writes(self.app_dir, registry.projects, self.data_dir)
                 new_root = Path(inspected['root'])
-                if any(Path(value).resolve().is_relative_to(new_root)
+                if any(_is_within(_resolve_path(value), new_root)
                        for project in registry.projects for value in project['roots'].values()):
                     raise WorkspaceError('project_ambiguous', '该目录包含已登记项目，请在明确的项目目录开始任务。')
                 config = json.loads(target.read_text(encoding='utf-8-sig'))
@@ -137,36 +127,15 @@ class Workspace:
         with configuration_lock(self.app_dir):
             registry = Registry(target)
             project = registry.get(project_id)
-            for other in registry.projects:
-                if other['id'] == project['id']:
-                    continue
-                for root in other['roots'].values():
-                    known = Path(root).resolve()
-                    if path.is_relative_to(known) or known.is_relative_to(path):
-                        raise WorkspaceError('project_ambiguous', '新目录与其他登记项目重叠。')
             if 'main' not in project['roots']:
                 raise WorkspaceError('invalid_workspace', '此项目使用多个自定义根目录，请通过 configure-roots 明确调整。')
             override = target.with_name('roots.local.json')
             if override.exists():
-                value = json.loads(override.read_text(encoding='utf-8-sig'))
-                value['projects'].setdefault(project['id'], {})['main'] = str(path)
-                changed = Registry(target, roots_override=value)
-                validate_configuration_writes(self.app_dir, changed.projects, self.data_dir)
                 if override.is_symlink():
                     raise WorkspaceError('state_unavailable', '目录映射不能通过符号链接重定向。')
-                pending = None
-                try:
-                    with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=target.parent,
-                                                     prefix='.roots-', suffix='.tmp', delete=False) as handle:
-                        pending = Path(handle.name)
-                        json.dump(value, handle, ensure_ascii=False, indent=2)
-                        handle.flush()
-                        os.fsync(handle.fileno())
-                    os.replace(pending, override)
-                    pending = None
-                finally:
-                    if pending is not None:
-                        pending.unlink(missing_ok=True)
+                value = json.loads(override.read_text(encoding='utf-8-sig'))
+                value['projects'].setdefault(project['id'], {})['main'] = str(path)
+                publish_root_mapping(self.app_dir, value, self.data_dir)
             else:
                 config = json.loads(target.read_text(encoding='utf-8-sig'))
                 item = next(item for item in config['projects'] if item['id'] == project['id'])

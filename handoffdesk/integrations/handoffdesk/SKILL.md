@@ -22,18 +22,20 @@ the missing directory or project identity only if the target is unclear.
 
 - For “把 /path/to/project 接入 HandoffDesk，以后主动记录”, resolve the
   existing local directory and run `agent inspect --cwd <directory>`.
-  Compare its returned project ID, root and match with the request. Reuse an
-  existing match, including a known Git worktree. If a separately requested
-  project falls inside another registered root, explain the overlap. Do not
-  silently use the parent or register a broader Git root.
+  For ordinary work, use the returned project, including a known Git worktree.
+  The deepest registered root owns the current directory. When the user
+  explicitly requests a separate project at a directory inside a registered
+  root, register that exact directory in the same state. Reuse an existing
+  registration for the same resolved directory. A parent can also be
+  registered after its child.
 - To register the exact directory, use the requested display name or its
   directory name. Choose an unused ID made of ASCII letters, digits, hyphens
   or underscores unless the user supplied an ID. `list` shows registered IDs
   and names. With an existing configuration run
   `project add <id> --name <name> --root <directory>`. For a confirmed fresh
   state use `init --project <id> --name <name> --root <directory>`. If a
-  registration races with another, inspect again and reuse the matching
-  binding. Report other failures. A missing directory requires the correct
+  registration races with another, inspect again and check that the
+  resolved root matches the requested directory before reusing the binding. Report other failures. A missing directory requires the correct
   path or a request to create it.
 - For “项目搬到了 /new/path”, identify the existing project by ID (resolve a
   name with `list`) and run `agent relocate --project <id> --root <directory>`.
