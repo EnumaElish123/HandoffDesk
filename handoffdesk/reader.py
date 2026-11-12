@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timezone
+from functools import lru_cache
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import json
 import os
@@ -129,15 +130,18 @@ class ReaderModel:
             params.append(cursor)
         if unread_only:
             conditions.append('r.record_id IS NULL')
-        if query.strip():
-            conditions.append('visible_match(h.project_id,h.revision,h.payload,s.payload)=1')
+        needle = self._search_key(query.strip())
+        match_column = ''
+        if needle:
+            match_column = ', visible_match(h.project_id,h.revision,h.payload,s.payload,f.payload) AS match_excerpt'
+            conditions.append('match_excerpt IS NOT NULL')
         # Registration removal must not leak stale project entries into the feed.
         placeholders = ','.join('?' for _ in known)
         conditions.append(f"CASE WHEN instr(h.project_id,char(31))=0 THEN h.project_id ELSE substr(h.project_id,1,instr(h.project_id,char(31))-1) END IN ({placeholders})")
         params.extend(known)
         project_key = "CASE WHEN instr(h.project_id,char(31))=0 THEN h.project_id ELSE substr(h.project_id,1,instr(h.project_id,char(31))-1) END"
         line_key = "CASE WHEN instr(h.project_id,char(31))=0 THEN 'default' ELSE substr(h.project_id,instr(h.project_id,char(31))+1) END"
-        sql = """SELECT h.rowid AS position,h.*,r.record_id IS NOT NULL AS is_read,f.payload AS file_state,s.payload AS source_payload FROM handoffs h
+        sql = """SELECT h.rowid AS position,h.*,r.record_id IS NOT NULL AS is_read,f.payload AS file_state,s.payload AS source_payload""" + match_column + """ FROM handoffs h
             LEFT JOIN reader_reads r ON r.reader_id='local' AND
             r.record_id=replace(h.project_id, char(31), ':') ||
                 CASE WHEN instr(h.project_id,char(31))=0 THEN ':default' ELSE '' END || ':' || h.revision
@@ -145,28 +149,32 @@ class ReaderModel:
             WHERE """ + ' AND '.join(conditions) + ' ORDER BY h.rowid DESC LIMIT ?'
         names = {}
         with service.store.connection() as db:
-            if query.strip():
-                needle = self._search_key(query.strip())
+            if needle:
                 names = {pid: {line['id']: line['name'] for line in service.list_worklines(pid, db=db)}
-                         for pid in known}
-                overlays = {(row['project_id'], row['node_id']): json.loads(row['payload'])
-                            for row in db.execute('SELECT * FROM node_file_state')}
+                         for pid in ([project] if project else known)}
                 snapshots = {}
 
-                def visible_match(scope, revision, raw, snapshot_raw):
+                # SQLite may evaluate a matching row twice (WHERE and projection).
+                @lru_cache(maxsize=1)
+                def visible_match(scope, revision, raw, snapshot_raw, overlay_raw):
                     identity = service.store.scope_identity(scope)
                     pid, line = identity['project_id'], identity.get('workline_id', 'default')
-                    if pid not in known:
-                        return False
+                    if pid not in names:
+                        return None
                     payload = json.loads(raw)
-                    fields = [f'{pid}:{line}:{revision}', payload.get('recorded_at', ''), known[pid]['name'], names[pid].get(line, '历史任务'),
-                              payload.get('current_task', ''), payload.get('last_done', ''),
-                              payload.get('next_action', ''), *payload.get('blockers', [])]
                     verification = payload.get('verification') or {}
-                    fields.extend([verification.get('status', ''), verification.get('summary', ''), (payload.get('actor') or {}).get('name', '')])
-                    fields.append({'passed': '验证通过', 'partial': '部分验证', 'not_run': '尚未验证', 'failed': '验证未通过'}.get(verification.get('status'), ''))
-                    if any(needle in self._search_key(field) for field in fields):
-                        return True
+                    label = {'passed': '验证通过', 'partial': '部分验证', 'not_run': '尚未验证',
+                             'failed': '验证未通过'}.get(verification.get('status'), '')
+                    fields = [('标题', payload.get('current_task', '')), ('实际完成', payload.get('last_done', '')),
+                              ('下一步', payload.get('next_action', '')), ('项目', known[pid]['name']),
+                              ('任务', names[pid].get(line, '历史任务')), ('记录编号', f'{pid}:{line}:{revision}'),
+                              ('时间', payload.get('recorded_at', '')), ('验证', verification.get('summary', '')),
+                              ('验证', label), ('验证', verification.get('status', '')),
+                              ('作者', (payload.get('actor') or {}).get('name', ''))]
+                    fields.extend(('阻塞', value) for value in payload.get('blockers', []))
+                    match = self._match_excerpt(needle, fields)
+                    if match:
+                        return match
                     base = payload.get('file_manifest')
                     if base is None:
                         key = (scope, payload.get('source_snapshot_id'))
@@ -174,13 +182,16 @@ class ReaderModel:
                             snapshot = json.loads(snapshot_raw) if snapshot_raw else None
                             snapshots[key] = service.node_files._snapshot_files(pid, snapshot)
                         base = snapshots[key]
-                    files = merge_files(base, overlays.get((pid, f'record:{line}:{revision}'), {}))
+                    files = merge_files(base, json.loads(overlay_raw) if overlay_raw else {})
                     for item in files:
                         path = PureWindowsPath(item['path']) if PureWindowsPath(item['path']).is_absolute() else Path(item['path'])
-                        fields.extend([str(path), path.name, item.get('purpose', ''), item.get('role', '')])
-                    return any(needle in self._search_key(field) for field in fields)
+                        match = self._match_excerpt(needle, [('文件名', path.name), ('路径', str(path)),
+                            ('附件用途', item.get('purpose', '')), ('文件角色', item.get('role', ''))])
+                        if match:
+                            return match
+                    return None
 
-                db.create_function('visible_match', 4, visible_match)
+                db.create_function('visible_match', 5, visible_match)
             rows = db.execute(sql, [*params, limit + 1]).fetchall()
             rows_to_show = rows[:limit]
             for row in rows_to_show:
@@ -188,30 +199,46 @@ class ReaderModel:
                 if pid not in names:
                     names[pid] = {line['id']: line['name'] for line in service.list_worklines(pid, db=db)}
         items = [self._record(service, row, include_files=False, names=names) for row in rows_to_show]
+        if needle:
+            for item, row in zip(items, rows_to_show):
+                item['match_excerpt'] = row['match_excerpt']
         return {'items': items, 'next_cursor': rows[limit - 1]['position'] if len(rows) > limit else None}
 
     @staticmethod
     def _search_key(value):
         return unicodedata.normalize('NFKC', str(value)).casefold().replace('\\', '/')
 
+    @classmethod
+    def _match_excerpt(cls, needle, fields):
+        for label, field in fields:
+            if field == '':
+                continue
+            text = str(field)
+            folded = cls._search_key(text)
+            start = folded.find(needle)
+            if start >= 0:
+                # Normalization can expand ligatures or compose several codepoints.
+                if len(text) != len(folded):
+                    text = folded
+                left = max(0, start - 16)
+                right = min(len(text), left + 72)
+                excerpt = ' '.join(text[left:right].split())
+                return f"{label} · {'…' if left else ''}{excerpt}{'…' if right < len(text) else ''}"
+        return None
+
     @staticmethod
-    def _record(service, row, *, include_files, names=None):
+    def _record(service, row, *, include_files, names):
         payload = json.loads(row['payload'])
         identity = service.store.scope_identity(row['project_id'])
         project, line_id = identity['project_id'], identity.get('workline_id', 'default')
-        if names is None:
-            names = {project: {line['id']: line['name'] for line in service.list_worklines(project)}}
         line_name = names[project].get(line_id, '历史任务')
         node_id = f"record:{line_id}:{row['revision']}"
         files = []
         base = payload.get('file_manifest')
         if base is None:
-            if 'source_payload' in row.keys():
-                snapshot = json.loads(row['source_payload']) if row['source_payload'] else None
-            else:
-                snapshot = service.store.snapshot(payload.get('source_snapshot_id'), row['project_id'])
+            snapshot = json.loads(row['source_payload']) if row['source_payload'] else None
             base = service.node_files._snapshot_files(project, snapshot)
-        associations = (json.loads(row['file_state']) if row['file_state'] else {}) if 'file_state' in row.keys() else service.store.node_file_state(project, node_id)
+        associations = json.loads(row['file_state']) if row['file_state'] else {}
         manifest = merge_files(base, associations)
         if include_files:
             files = [service.node_files._display_file(project, node_id, item)
@@ -231,12 +258,19 @@ class ReaderModel:
         project, line, revision = self._identity(record_id)
         project, scope = self._record_scope(service, project, line)
         with service.store.connection() as db:
-            row = db.execute("""SELECT h.*,EXISTS(SELECT 1 FROM reader_reads
-                WHERE reader_id='local' AND record_id=?) AS is_read
-                FROM handoffs h WHERE project_id=? AND revision=?""", (record_id, scope, revision)).fetchone()
-        if row is None:
-            raise ValueError('记录不存在，请刷新列表。')
-        return self._record(service, row, include_files=True)
+            row = db.execute("""SELECT h.*, EXISTS(SELECT 1 FROM reader_reads
+                WHERE reader_id='local' AND record_id=?) AS is_read,
+                f.payload AS file_state, s.payload AS source_payload
+                FROM handoffs h
+                LEFT JOIN node_file_state f ON f.project_id=? AND f.node_id=?
+                LEFT JOIN snapshots s ON s.id=json_extract(h.payload,'$.source_snapshot_id')
+                    AND s.project_id=h.project_id
+                WHERE h.project_id=? AND h.revision=?""",
+                (record_id, project, f'record:{line}:{revision}', scope, revision)).fetchone()
+            if row is None:
+                raise ValueError('记录不存在，请刷新列表。')
+            names = {project: {entry['id']: entry['name'] for entry in service.list_worklines(project, db=db)}}
+        return self._record(service, row, include_files=True, names=names)
 
     def ack(self, record_ids):
         return self._set_read(record_ids, True)
@@ -262,6 +296,11 @@ class ReaderModel:
                 else:
                     db.execute("DELETE FROM reader_reads WHERE reader_id='local' AND record_id=?", (record_id,))
         return {'ok': True, 'record_ids': list(dict.fromkeys(record_ids))}
+
+    def change_monitor(self):
+        """A long-lived observer for one terminal worker; close it on that worker."""
+        from .reader_watch import ReaderChangeMonitor
+        return ReaderChangeMonitor(self)
 
     def changes(self, cursor=None):
         service = self._service()

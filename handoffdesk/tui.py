@@ -22,14 +22,16 @@ def ensure_terminal():
 
 def create_app(app_dir=None, data_dir=None):
     import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+    from time import monotonic
     from rich.text import Text
     from textual.app import App, ComposeResult
     from textual.binding import Binding
     from textual.containers import Horizontal, Vertical
     from textual.screen import ModalScreen, Screen
-    from textual.widgets import Footer, Header, Input, Label, OptionList, Select, Static, TextArea
+    from textual.widgets import Footer, Input, Label, OptionList, Select, Static, TextArea
     from textual.widgets.option_list import Option
-    from .reader import ReaderModel, safe_text, format_recorded_at
+    from .reader import ReaderModel, safe_text
     from .paths import app_directory
 
     from .tui_projects import make_project_screens, save_reading_position
@@ -175,8 +177,12 @@ def create_app(app_dir=None, data_dir=None):
             if self.app.is_running and self in self.app.screen_stack:
                 self.query_one('#connection-info', TextArea).load_text(safe_text(text))
 
+    class FeedScreen(Screen):
+        def on_screen_resume(self):
+            self.app.finish_feed_entry()
+
     class HandoffApp(App):
-        MODES = {'_default': Screen, 'projects': Home}
+        MODES = {'_default': FeedScreen, 'projects': Home}
         TITLE = 'HandoffDesk'
         SUB_TITLE = '本机进展 · Agent 记录，随时续接'
         CSS = '''
@@ -192,7 +198,7 @@ def create_app(app_dir=None, data_dir=None):
         #body { height: 1fr; }
         #records { width: 40%; height: 1fr; border: round $primary; }
         #detail { width: 1fr; height: 1fr; border: round $accent; padding: 0 1; }
-        #empty { width: 1fr; height: 1fr; padding: 1; display: none; }
+        #empty { width: 1fr; height: 1fr; padding: 1; display: none; overflow-y: auto; }
         .empty-mode #empty { display: block; }
         .empty-mode #records, .empty-mode #detail { display: none; }
         .narrow #records { width: 100%; }
@@ -215,11 +221,20 @@ def create_app(app_dir=None, data_dir=None):
             self.items, self.current, self.feed_cursor, self.next_cursor = [], None, None, None
             self.list_request, self.detail_request = 0, 0
             self.unread_only, self.polling = False, False
-            self.project_signature, self.projects_data, self.task_signature = None, [], None
+            self.project_signature, self.projects_data = None, []
             self.pending_updates = False
             self.reader_screen = None
+            self.monitor = model.change_monitor()
+            self.monitor_thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix='handoffdesk-watch')
+            self.next_poll = 0
+            self.poll_delay = 1.5
+            self.search_timer = None
+            self.search_busy = self.search_queued = False
+            self.write_lock = asyncio.Lock()
+            self.record_notice = None
             self.metadata_visible = False
             self.search_origin = None
+            self.pending_entry = None
             self.feed_visit = 0
             self.feed_ready = False
 
@@ -243,10 +258,22 @@ def create_app(app_dir=None, data_dir=None):
             self.reader_screen = self.screen
             self.reader_screen.add_class('list-mode')
             self.resize_layout()
-            self.set_interval(1.5, self.poll)
+            self.set_interval(1.5, self.schedule_poll)
             self.switch_mode('projects')
 
+        async def on_unmount(self):
+            await asyncio.get_running_loop().run_in_executor(self.monitor_thread, self.monitor.close)
+            self.monitor_thread.shutdown(wait=True)
+
+        async def changes(self, cursor):
+            return await asyncio.get_running_loop().run_in_executor(self.monitor_thread, self.monitor.changes, cursor)
+
+        def schedule_poll(self):
+            if self.is_running and not self.polling and monotonic() >= self.next_poll:
+                self.run_worker(self.poll(), group='watch')
+
         def open_feed(self, project=None, line=None, record_id=None, *, search=False):
+            self.pending_entry = None
             self.feed_ready = False
             self.switch_mode('_default')
             self.feed_visit += 1
@@ -267,8 +294,13 @@ def create_app(app_dir=None, data_dir=None):
 
         async def prepare_feed(self, visit, project, line, record_id, search):
             try:
+                # Capture a baseline before loading the page, so a concurrent commit is seen on the next poll.
+                initial = await self.changes(None)
+                if visit != self.feed_visit:
+                    return
+                self.feed_cursor = initial['cursor']
                 await self.load_projects()
-                if visit != self.feed_visit or self.screen is not self.reader_screen:
+                if visit != self.feed_visit or self.current_mode == 'projects':
                     return
                 with self.prevent(Select.Changed, Input.Changed):
                     if project and not any(p['id'] == project for p in self.projects_data):
@@ -280,22 +312,31 @@ def create_app(app_dir=None, data_dir=None):
                 self.feed_ready = True
                 self.filter_changed()
                 await self.load_records()
-                if visit != self.feed_visit or self.screen is not self.reader_screen:
-                    return
-                if record_id:
-                    await self.open_record(record_id)
-                elif search:
-                    self.action_search()
-                else:
-                    self.widget('#records').focus()
+                if visit == self.feed_visit and self.current_mode != 'projects':
+                    self.pending_entry = (record_id, search)
+                    self.finish_feed_entry()
             except (ValueError, OSError, sqlite3.Error) as exc:
                 self.status('读取失败，可返回项目重选：' + safe_text(exc))
+
+        def finish_feed_entry(self):
+            if not self.pending_entry or self.screen is not self.reader_screen:
+                return
+            record_id, search = self.pending_entry
+            self.pending_entry = None
+            if record_id:
+                self.run_worker(self.open_record(record_id), group='open-detail', name=record_id)
+            elif search:
+                self.action_search()
+            else:
+                self.widget('#records').focus()
 
         def check_action(self, action, parameters):
             if self.reader_screen is None:
                 return super().check_action(action, parameters)
             reader_actions = {'back', 'files', 'export', 'search', 'projects', 'tasks', 'refresh',
-                              'unread', 'clear_filters', 'continue_task', 'more', 'next_record', 'previous_record', 'metadata', 'mark_unread', 'advanced', 'change_scope'}
+                              'unread', 'clear_filters', 'continue_task', 'more', 'next_record', 'previous_record', 'metadata', 'mark_unread'}
+            if action in reader_actions - {'back'} and self.screen is self.reader_screen and not self.feed_ready:
+                return False
             if action in reader_actions and self.screen is not self.reader_screen:
                 return False
             if action in {'files', 'export', 'continue_task', 'mark_unread', 'metadata'}:
@@ -317,7 +358,7 @@ def create_app(app_dir=None, data_dir=None):
         def status(self, text):
             if not self.is_running or self.reader_screen is None:
                 return
-            self.widget('#status', Static).update(safe_text(text))
+            self.widget('#status', Static).update(safe_text(self.record_notice if self.current and self.record_notice else text))
 
         async def load_projects(self):
             projects = await asyncio.to_thread(model.projects)
@@ -429,9 +470,18 @@ def create_app(app_dir=None, data_dir=None):
                 combined = self.items + result['items'] if more else result['items']
                 self.items = list({item['id']: item for item in combined}.values())
                 self.next_cursor = result['next_cursor']
-                listing.clear_options()
-                listing.add_options([Option(render_record_option(item, query, zone), id=item['id'])
-                                     for item in self.items])
+                ids = [item['id'] for item in self.items]
+                displayed = [option.id for option in listing.options]
+                prompts = [render_record_option(item, query, zone) for item in self.items]
+                if ids[:len(displayed)] == displayed:
+                    for index, (rid, prompt) in enumerate(zip(ids, prompts)):
+                        if index == listing.option_count:
+                            listing.add_options(Option(p, id=k) for k, p in zip(ids[index:], prompts[index:]))
+                            break
+                        if listing.get_option_at_index(index).prompt != prompt:
+                            listing.replace_option_prompt(rid, prompt)
+                else:
+                    listing.set_options(Option(prompt, id=rid) for rid, prompt in zip(ids, prompts))
                 listing.highlighted = next((i for i, item in enumerate(self.items) if item['id'] == prior_id), 0) if self.items else None
                 if preserve_depth and prior_id and old_scroll:
                     # Background polling is deferred when scrolled; explicit refresh preserves the anchor.
@@ -447,21 +497,30 @@ def create_app(app_dir=None, data_dir=None):
                     message = await self.empty_message()
                     if request == self.list_request and self.is_running:
                         self.widget('#empty', Static).update(message)
-                if not self.is_running:
+                if request != self.list_request or not self.is_running:
                     return
                 self.status(('未读 · ' if self.unread_only else '') + f"{len(self.items)} 条记录" + (' · n 加载更多' if self.next_cursor else '') + ' · ↑↓ 选择 · Enter 阅读')
             except (ValueError, OSError, sqlite3.Error) as exc:
-                self.status('读取失败：' + str(exc))
+                if request == self.list_request and self.is_running:
+                    self.status('读取失败：' + safe_text(exc))
 
         async def poll(self):
-            if not self.feed_ready or self.polling or self.current_mode == 'projects' or self.reader_screen is None:
+            home = self.current_mode == 'projects'
+            origin = self.screen
+            if self.polling or (home and not isinstance(origin, Home)) or (not home and not self.feed_ready):
                 return
             self.polling = True
             try:
-                value = await asyncio.to_thread(model.changes, self.feed_cursor)
-                if not self.is_running:
+                visit = self.feed_visit
+                value = await self.changes(self.feed_cursor)
+                if not self.is_running or visit != self.feed_visit or self.screen is not origin:
                     return
+                self.poll_delay = 1.5 if value['changed'] else min(12, self.poll_delay * 2)
                 if value['changed']:
+                    if home:
+                        self.feed_cursor = value['cursor']
+                        origin.action_refresh()
+                        return
                     self.feed_cursor = value['cursor']
                     await self.load_projects()
                     if not self.is_running:
@@ -475,12 +534,34 @@ def create_app(app_dir=None, data_dir=None):
             except (ValueError, OSError, sqlite3.Error) as exc:
                 self.status('更新失败，可按 r 重试：' + str(exc))
             finally:
+                self.next_poll = monotonic() + self.poll_delay
                 self.polling = False
 
-        async def on_input_changed(self, event):
+        def enqueue_search(self):
+            self.search_timer = None
+            if not self.search_origin or not self.feed_ready:
+                return
+            self.search_queued = True
+            if not self.search_busy:
+                self.search_busy = True
+                self.run_worker(self.run_search(), group='search')
+
+        async def run_search(self):
+            try:
+                while self.search_queued:
+                    self.search_queued = False
+                    await self.load_records()
+            finally:
+                self.search_busy = False
+
+        def on_input_changed(self, event):
             if event.input.id == 'search' and self.feed_ready and self.screen is self.reader_screen and self.is_running:
                 self.filter_changed()
-                await self.load_records()
+                self.list_request += 1
+                self.search_queued = False
+                if self.search_timer:
+                    self.search_timer.stop()
+                self.search_timer = self.set_timer(0.18, self.enqueue_search)
 
         async def on_select_changed(self, event):
             if event.select.id in {'project', 'task'} and self.feed_ready and self.screen is self.reader_screen and self.is_running:
@@ -492,7 +573,10 @@ def create_app(app_dir=None, data_dir=None):
         async def on_option_list_option_selected(self, event):
             if event.option_list.id != 'records':
                 return
-            await self.open_record(event.option.id)
+            self.current = None
+            self.refresh_bindings()
+            self.status('正在打开记录…')
+            self.run_worker(self.open_record(event.option.id), name=event.option.id, group='open-detail')
 
         async def open_record(self, record_id):
             self.detail_request += 1
@@ -504,21 +588,37 @@ def create_app(app_dir=None, data_dir=None):
                 if request != self.detail_request or not self.is_running:
                     return
                 self.current = value
+                self.record_notice = None
                 self.widget('#detail', TextArea).load_text(text)
                 self.reader_screen.remove_class('list-mode')
                 self.reader_screen.add_class('detail-mode')
                 self.widget('#detail').focus()
+                self.status('Esc 返回列表 · m 元数据 · y 续接')
                 self.refresh_bindings()
-                try:
-                    await asyncio.to_thread(model.ack, [record_id])
-                except (ValueError, OSError, sqlite3.Error) as exc:
-                    self.status('正文已打开，已读状态待同步：' + safe_text(exc))
-                try:
-                    await asyncio.to_thread(save_reading_position, model, value)
-                except (ValueError, OSError, sqlite3.Error) as exc:
-                    self.status('阅读位置未保存：' + safe_text(exc))
+                async with self.write_lock:
+                    await self.remember_record(record_id, value)
+
             except (ValueError, OSError, sqlite3.Error) as exc:
-                self.status('无法读取详情：' + str(exc))
+                if request == self.detail_request and self.is_running:
+                    self.status('无法读取详情：' + safe_text(exc))
+
+        async def remember_record(self, record_id, value):
+            await self.ack_record(record_id)
+            try:
+                await asyncio.to_thread(save_reading_position, model, value)
+            except (ValueError, OSError, sqlite3.Error) as exc:
+                self.status('阅读位置未保存：' + safe_text(exc))
+
+        async def ack_record(self, record_id):
+            try:
+                await asyncio.to_thread(model.ack, [record_id])
+            except (ValueError, OSError, sqlite3.Error) as exc:
+                if self.current and self.current['id'] == record_id:
+                    self.record_notice = '正文已打开，已读状态待同步 · r 重试：' + safe_text(exc)
+                    self.status(self.record_notice)
+            else:
+                if self.current and self.current['id'] == record_id:
+                    self.record_notice = None
 
         def action_search(self):
             if self.search_origin is None:
@@ -559,13 +659,31 @@ def create_app(app_dir=None, data_dir=None):
             self.push_screen(ActionMenu('切换任务', choices, placeholder='查找任务…'), self.choose_scope)
 
         def on_option_list_option_highlighted(self, event):
-            if event.option_list.id != 'records' or self.current or not self.items:
-                return
+            listing = event.option_list
             index = event.option_index
-            if index < len(self.items) and self.items[index]['id'] == event.option.id:
-                self.widget('#detail', TextArea).load_text(render_preview(self.items[index], zone))
+            if (listing.id != 'records' or self.screen is not self.reader_screen
+                    or index != listing.highlighted or index >= len(self.items)
+                    or self.items[index]['id'] != event.option.id):
+                return
+            if self.current:
+                if not listing.has_focus or self.current['id'] == event.option.id:
+                    return
+                self.filter_changed()
+            elif listing.has_focus:
+                # Invalidate a late read without cancelling a displayed record's acknowledgement.
+                opening = next((w for w in reversed(self.workers) if w.group == 'open-detail'), None)
+                if opening is not None and opening.name != event.option.id:
+                    self.detail_request += 1
+            self.widget('#detail', TextArea).load_text(render_preview(self.items[index], zone))
 
         async def action_refresh(self):
+            self.next_poll = 0
+            self.poll_delay = 1.5
+            self.status('正在刷新记录…')
+            if self.current and self.record_notice:
+                async with self.write_lock:
+                    if self.current:
+                        await self.ack_record(self.current['id'])
             try:
                 await self.load_projects()
                 await self.load_records(preserve_depth=True)
@@ -601,6 +719,10 @@ def create_app(app_dir=None, data_dir=None):
             elif self.search_origin:
                 project, line, unread, anchor, scroll, depth = self.search_origin
                 self.search_origin = None
+                self.search_queued = False
+                if self.search_timer:
+                    self.search_timer.stop()
+                    self.search_timer = None
                 self.reader_screen.remove_class('search-mode')
                 self.apply_scope(project, line)
                 self.unread_only = unread
@@ -623,9 +745,10 @@ def create_app(app_dir=None, data_dir=None):
 
         async def action_files(self):
             if self.current and self.current['files']:
+                record_id = self.current['id']
                 try:
-                    current = await asyncio.to_thread(model.detail, self.current['id'])
-                    if self.is_running:
+                    current = await asyncio.to_thread(model.detail, record_id)
+                    if self.is_running and self.screen is self.reader_screen and self.current and self.current['id'] == record_id:
                         self.push_screen(FilesScreen(current))
                 except (ValueError, OSError, sqlite3.Error) as exc:
                     self.status('读取文件失败：' + str(exc))
@@ -659,7 +782,9 @@ def create_app(app_dir=None, data_dir=None):
             if not self.current:
                 return
             try:
-                await asyncio.to_thread(model.mark_unread, [self.current['id']])
+                record_id = self.current['id']
+                async with self.write_lock:
+                    await asyncio.to_thread(model.mark_unread, [record_id])
             except (OSError, ValueError, sqlite3.Error) as exc:
                 self.status('标为未读失败：' + safe_text(exc))
                 return
@@ -707,10 +832,18 @@ def create_app(app_dir=None, data_dir=None):
             self.push_screen(ActionMenu('更多操作', choices), selected)
 
         def action_next_record(self):
-            self.widget('#records', OptionList).action_cursor_down()
+            listing = self.widget('#records', OptionList)
+            if self.current:
+                self.filter_changed()
+            listing.focus()
+            listing.action_cursor_down()
 
         def action_previous_record(self):
-            self.widget('#records', OptionList).action_cursor_up()
+            listing = self.widget('#records', OptionList)
+            if self.current:
+                self.filter_changed()
+            listing.focus()
+            listing.action_cursor_up()
 
         def action_help(self):
             context = self.scope_name() if self.screen is self.reader_screen else '项目导航'

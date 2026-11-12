@@ -14,7 +14,7 @@ import termios
 import time
 
 
-def run_terminal(command, timeout):
+def run_terminal(command, timeout, *, compare=False):
     master, slave = pty.openpty()
     start = time.monotonic()
     try:
@@ -27,10 +27,14 @@ def run_terminal(command, timeout):
     finally:
         os.close(slave)
 
-    def wait_for(marker):
+    def wait_for(*markers, legacy_markers=()):
         data = bytearray()
         deadline = time.monotonic() + timeout
-        while marker not in data:
+        while True:
+            if all(marker in data for marker in markers):
+                return time.monotonic(), False
+            if legacy_markers and all(marker in data for marker in legacy_markers):
+                return time.monotonic(), True
             left = deadline - time.monotonic()
             if left <= 0 or not select.select([master], [], [], left)[0]:
                 break
@@ -43,18 +47,23 @@ def run_terminal(command, timeout):
             if not chunk:
                 break
             data.extend(chunk)
-        if marker not in data:
-            raise RuntimeError(f'Terminal did not display {marker!r}: {bytes(data[-4000:])!r}')
-        return time.monotonic()
+        raise RuntimeError(f'Terminal did not display {markers!r}: {bytes(data[-4000:])!r}')
 
     try:
-        home = wait_for(b'TerminalFixture')
+        # The earlier release opens directly in the feed. Only comparison runs
+        # may use that path so a missing home in the tested release still fails.
+        legacy_markers = (b'MilestoneProbe', '条记录'.encode()) if compare else ()
+        first, legacy = wait_for('HandoffDesk / 项目'.encode(), b'TerminalFixture', legacy_markers=legacy_markers)
+        if legacy:
+            listed = first
+        else:
+            os.write(master, b'\r')
+            wait_for('项目全部进展'.encode())
+            os.write(master, b'\r')
+            # Project summaries also show record titles. The list hint confirms focus.
+            listed, _ = wait_for(b'MilestoneProbe', 'Enter 阅读'.encode())
         os.write(master, b'\r')
-        wait_for('项目全部进展'.encode())
-        os.write(master, b'\r')
-        listed = wait_for(b'MilestoneProbe')
-        os.write(master, b'\r')
-        opened = wait_for(b'DetailProbe')
+        opened, _ = wait_for(b'DetailProbe')
         os.write(master, b'\x1b')
         time.sleep(0.2)
         os.write(master, b'q')
@@ -74,7 +83,7 @@ def run_terminal(command, timeout):
                     break
         if proc.wait(timeout=max(0.01, deadline - time.monotonic())) != 0:
             raise RuntimeError('Terminal exited with an error')
-        return {'home_s': round(home - start, 3), 'list_s': round(listed - start, 3),
+        return {'home_s': None if legacy else round(first - start, 3), 'list_s': round(listed - start, 3),
                 'enter_to_detail_s': round(opened - listed, 3), 'detail_s': round(opened - start, 3)}
     finally:
         if proc.poll() is None:
@@ -121,12 +130,15 @@ def main():
         if run('feed')['items'][0]['id'] != receipt['record_id']:
             raise RuntimeError('Checkpoint was missing after restarting the CLI')
 
-        for binary, repeat in [(exe, args.repeat)] + ([(args.compare.resolve(), 1)] if args.compare else []):
+        runs = [(exe, args.repeat, False)]
+        if args.compare:
+            runs.append((args.compare.resolve(), 1, True))
+        for binary, repeat, compare in runs:
             for _ in range(repeat):
                 start = time.monotonic()
                 subprocess.run([binary, '--version'], capture_output=True, check=True, timeout=args.timeout)
                 version = time.monotonic() - start
-                result = run_terminal([binary, *state, 'tui'], args.timeout)
+                result = run_terminal([binary, *state, 'tui'], args.timeout, compare=compare)
                 print(json.dumps({'executable': str(binary), 'version_s': round(version, 3), **result}), flush=True)
 
 

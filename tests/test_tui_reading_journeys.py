@@ -1,8 +1,10 @@
 """Real reader journeys across navigation, read state, and contextual actions."""
+import asyncio
 import importlib.util
 from pathlib import Path
 import sqlite3
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -67,6 +69,49 @@ class ReadingJourneys(unittest.IsolatedAsyncioTestCase):
             await app.action_mark_unread()
             self.assertFalse(self.model.detail(self.ids[0])['read'])
             self.assertTrue(self.model.detail(self.ids[1])['read'])
+
+    async def test_wide_list_focus_updates_action_target_and_discards_late_detail(self):
+        from handoffdesk.reader import ReaderModel
+        from handoffdesk.tui import create_app
+        from textual.widgets import OptionList, TextArea
+
+        app = create_app(self.state)
+        async with app.run_test(size=(120, 36)) as pilot:
+            await pilot.pause()
+            await pilot.press('enter', 'enter', 'enter')
+            self.assertEqual(app.current['id'], self.ids[1])
+            await app.load_records(preserve_depth=True)
+            await pilot.pause()
+            self.assertEqual(app.current['id'], self.ids[1])
+            listing = app.widget('#records', OptionList)
+            listing.focus()
+            await pilot.press('down', 'e', 'y')
+            self.assertIsNone(app.current)
+            self.assertIs(app.screen, app.reader_screen)
+            self.assertIn('先前记录下一步', app.widget('#detail', TextArea).text)
+
+            started, release = threading.Event(), threading.Event()
+            detail = ReaderModel.detail
+            def delayed(model, record_id):
+                started.set()
+                if not release.wait(5):
+                    raise AssertionError('Detail test did not release the worker')
+                return detail(model, record_id)
+            with patch.object(ReaderModel, 'detail', delayed):
+                try:
+                    await pilot.press('enter')
+                    self.assertTrue(await asyncio.to_thread(started.wait, 2))
+                    await pilot.press('up')
+                finally:
+                    release.set()
+                await app.workers.wait_for_complete()
+            self.assertIsNone(app.current)
+            self.assertFalse(self.model.detail(self.ids[0])['read'])
+            self.assertIn('当前记录下一步', app.widget('#detail', TextArea).text)
+            await pilot.press('enter', 'j')
+            self.assertIsNone(app.current)
+            self.assertEqual(listing.highlighted, 1)
+            self.assertIs(app.focused, listing)
 
     async def test_ack_failure_keeps_readable_detail(self):
         from handoffdesk.tui import create_app

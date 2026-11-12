@@ -2,6 +2,11 @@
 
 ## Unreleased — Linux workflow improvements
 
+- Open the Linux terminal reader on a project homepage with directory registration, task creation, recent reading position and scoped history.
+- Present next actions first, preview without acknowledging, and offer a searchable command menu, help and selectable clipboard text.
+- Coalesce search requests and use a thread-owned SQLite change monitor for the TUI; keep existing clients and database schemas compatible.
+
+
 - Load command implementations after argument parsing and open existing v5 WAL databases without taking the writer lock.
 - Reuse workline lookups across a feed page and render terminal details from the record already loaded. Exercise the packaged Linux reader in a real pseudo-terminal.
 - Preserve registered state directories on source reinstall, provide owned user command launchers, and report actionable connection diagnostics.
