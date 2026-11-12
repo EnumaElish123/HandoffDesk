@@ -7,7 +7,7 @@ from rich.text import Text
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, OptionList, Static, TextArea
+from textual.widgets import Button, Footer, Input, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
 from .reader import format_recorded_at, safe_text
@@ -174,14 +174,18 @@ class ActionMenu(ReadingDialog):
         self.dismiss(event.option.id)
 
 
-class HelpScreen(ReadingDialog):
+class ReadOnlyDialog(ReadingDialog):
+    BINDINGS = [Binding('q', 'app.quit', '退出')]
+
+
+class HelpScreen(ReadOnlyDialog):
     def __init__(self, context, choices):
         super().__init__()
         self.context = context
         self.choices = list(choices)
 
     def compose(self):
-        lines = ['当前位置可用的操作']
+        lines = ['当前位置可用的操作', '.    更多操作（也可用 Ctrl+P）']
         for _, label, key, _ in self.choices:
             lines.append(f"{key or '更多操作'}    {label}")
         lines.extend(['', '移动与选择', '↑ / ↓    选择一项', 'Enter    打开选中项',
@@ -192,6 +196,7 @@ class HelpScreen(ReadingDialog):
             yield Static('操作帮助 · ' + safe_text(self.context), classes='dialog-title', markup=False)
             yield TextArea(safe_text('\n'.join(lines)), read_only=True, soft_wrap=True, id='help-body')
             yield Button('返回 (Esc)', id='help-close')
+        yield Footer(compact=True, show_command_palette=False)
 
     def on_mount(self):
         self.query_one('#help-body', TextArea).focus()
@@ -200,7 +205,7 @@ class HelpScreen(ReadingDialog):
         self.dismiss()
 
 
-class AdvancedScreen(ReadingDialog):
+class AdvancedScreen(ReadOnlyDialog):
     """Expose existing CLI workflows with the same storage and project scope."""
     def __init__(self, project_id, workline_id=None, *, app_dir=None, data_dir=None):
         super().__init__()
@@ -233,6 +238,7 @@ class AdvancedScreen(ReadingDialog):
             yield Static('高级操作 · ' + safe_text(self.context), classes='dialog-title', markup=False)
             yield TextArea(self.instructions, id='advanced-body', read_only=True, soft_wrap=True)
             yield Button('返回 (Esc)', id='advanced-close')
+        yield Footer(compact=True, show_command_palette=False)
 
     def on_mount(self):
         self.query_one('#advanced-body', TextArea).focus()
@@ -241,7 +247,7 @@ class AdvancedScreen(ReadingDialog):
         self.dismiss()
 
 
-class CopyScreen(ReadingDialog):
+class CopyScreen(ReadOnlyDialog):
     """Send the requested text to the terminal and keep the source selectable."""
     def __init__(self, title, text):
         super().__init__()
@@ -256,6 +262,7 @@ class CopyScreen(ReadingDialog):
             with Horizontal(classes='dialog-buttons'):
                 yield Button('再次复制', id='copy-again')
                 yield Button('返回 (Esc)', id='copy-close')
+        yield Footer(compact=True, show_command_palette=False)
 
     def on_mount(self):
         self.copy_content()

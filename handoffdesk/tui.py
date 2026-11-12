@@ -33,10 +33,11 @@ def create_app(app_dir=None, data_dir=None):
     from textual.widgets.option_list import Option
     from .reader import ReaderModel, safe_text
     from .paths import app_directory
+    from . import terminal_session
 
     from .tui_projects import make_project_screens, save_reading_position
 
-    from .tui_reading import (ActionMenu, AdvancedScreen, CopyScreen, HelpScreen, continuation_text,
+    from .tui_reading import (ActionMenu, AdvancedScreen, CopyScreen, HelpScreen, ReadOnlyDialog, continuation_text,
                               render_detail, render_preview, render_record_option)
 
     model = ReaderModel(app_dir, data_dir)
@@ -50,7 +51,7 @@ def create_app(app_dir=None, data_dir=None):
             return self._index_to_line.get(index, 0)
 
     class FilesScreen(ModalScreen):
-        BINDINGS = [('escape', 'back', '返回'), Binding('ctrl+c', 'copy_path', '复制路径', priority=True),
+        BINDINGS = [('escape', 'back', '返回'), ('q', 'app.quit', '退出'), Binding('ctrl+c', 'copy_path', '复制路径', priority=True),
                     ('m', 'metadata', '位置与用途')]
         CSS = '''
         FilesScreen { background: $surface; }
@@ -77,6 +78,7 @@ def create_app(app_dir=None, data_dir=None):
                 yield Static('', id='file-notice', markup=False)
                 yield TextArea('', read_only=True, id='file-preview', soft_wrap=True)
                 yield Static('Enter 阅读 · Esc 返回 · Ctrl+C 复制路径', id='file-help', markup=False)
+            yield Footer(compact=True)
 
         async def on_option_list_option_selected(self, event):
             self.request += 1
@@ -157,12 +159,13 @@ def create_app(app_dir=None, data_dir=None):
             self.dismiss(path)
 
     class ConnectionScreen(ModalScreen):
-        BINDINGS = [('escape', 'dismiss', '返回'), ('r', 'reload', '重新检查')]
+        BINDINGS = [('escape', 'dismiss', '返回'), ('q', 'app.quit', '退出'), ('r', 'reload', '重新检查')]
         CSS = '#connection-info { height: 1fr; } #connection-heading { height: 2; }'
 
         def compose(self):
             yield Static('接入与状态 · r 重新检查 · Esc 返回', id='connection-heading', markup=False)
             yield TextArea('正在检查…', read_only=True, soft_wrap=True, id='connection-info')
+            yield Footer(compact=True)
 
         async def on_mount(self):
             await self.action_reload()
@@ -183,6 +186,7 @@ def create_app(app_dir=None, data_dir=None):
 
     class HandoffApp(App):
         MODES = {'_default': FeedScreen, 'projects': Home}
+        ENABLE_COMMAND_PALETTE = False  # HandoffDesk supplies its own contextual menu.
         TITLE = 'HandoffDesk'
         SUB_TITLE = '本机进展 · Agent 记录，随时续接'
         CSS = '''
@@ -206,13 +210,14 @@ def create_app(app_dir=None, data_dir=None):
         .narrow.list-mode #detail { display: none; }
         .narrow.detail-mode #records { display: none; }
         '''
-        BINDINGS = [Binding('q', 'quit', '退出', show=False), Binding('/', 'search', '搜索'),
+        BINDINGS = [Binding('full_stop', 'command_palette', '更多操作', key_display='.'),
+                    Binding('q', 'quit', '退出'), Binding('/', 'search', '搜索'),
                     Binding('p', 'projects', '项目', show=False), Binding('t', 'tasks', '任务', show=False),
                     Binding('f', 'files', '文件'), Binding('r', 'refresh', '刷新', show=False),
                     Binding('u', 'unread', '未读', show=False), Binding('escape', 'back', '返回'),
                     Binding('n', 'more', '下一页', show=False), Binding('e', 'export', '导出'),
                     Binding('c', 'connection', '接入状态', show=False), Binding('m', 'metadata', '元数据', show=False),
-                    Binding('ctrl+p', 'command_palette', '更多操作', priority=True), Binding('y', 'continue_task', '续接', show=False),
+                    Binding('ctrl+p', 'command_palette', '更多操作', show=False, priority=True), Binding('y', 'continue_task', '续接', show=False),
                     Binding('j', 'next_record', show=False), Binding('k', 'previous_record', show=False),
                     Binding('?', 'help', '帮助'), Binding('x', 'clear_filters', '清空筛选', show=False)]
 
@@ -252,7 +257,7 @@ def create_app(app_dir=None, data_dir=None):
                 yield AnchoredOptions(id='records')
                 yield TextArea('选择一条进展，按 Enter 阅读。', read_only=True, soft_wrap=True, id='detail')
                 yield Static('', id='empty', markup=False)
-            yield Footer()
+            yield Footer(compact=True)
 
         async def on_mount(self):
             self.reader_screen = self.screen
@@ -341,8 +346,11 @@ def create_app(app_dir=None, data_dir=None):
                 return False
             if action in {'files', 'export', 'continue_task', 'mark_unread', 'metadata'}:
                 return bool(self.current and (action != 'files' or self.current['files']))
-            if action in {'quit', 'help', 'connection', 'command_palette'} and isinstance(self.screen, ModalScreen):
-                return False
+            if isinstance(self.screen, ModalScreen):
+                if action in {'help', 'connection', 'command_palette'}:
+                    return False
+                if action == 'quit' and not isinstance(self.screen, (ReadOnlyDialog, FilesScreen, ConnectionScreen)):
+                    return False
             if action == 'quit' and isinstance(self.focused, Input):
                 return False
             return super().check_action(action, parameters)
@@ -798,6 +806,10 @@ def create_app(app_dir=None, data_dir=None):
             if project:
                 self.push_screen(AdvancedScreen(project, line, app_dir=app_dir, data_dir=data_dir))
 
+        def action_help_quit(self):
+            if self.check_action('quit', ()):
+                self.notify('按 q 退出阅读器。')
+
         def menu_choices(self):
             if self.screen is self.reader_screen:
                 actions = [('search','搜索记录','/','查找'),('projects','切换项目或扩大搜索范围','p','全部项目'),
@@ -816,8 +828,17 @@ def create_app(app_dir=None, data_dir=None):
                 project = getattr(self.screen, 'project_id', None)
             if project:
                 actions.append(('advanced','项目高级操作','','来源 历史 计划 材料 CLI'))
-            return actions + [('connection','接入与诊断','c','连接 状态'),('help','操作帮助','?','键盘'),
-                              ('quit','退出阅读器','q','关闭')]
+            actions.extend([('connection','接入与诊断','c','连接 状态'),('help','操作帮助','?','键盘')])
+            if terminal_session.is_managed_reader():
+                actions.append(('detach','离开并保持运行','','分离 暂离 保留位置 tmux detach'))
+            actions.append(('quit','退出阅读器','q','关闭 结束'))
+            return actions
+
+        async def action_detach(self):
+            try:
+                await asyncio.to_thread(terminal_session.detach_reader)
+            except ValueError as exc:
+                self.notify(safe_text(exc), severity='warning')
 
         def action_command_palette(self):
             if isinstance(self.screen, ModalScreen):
@@ -826,6 +847,11 @@ def create_app(app_dir=None, data_dir=None):
             choices = self.menu_choices()
             async def selected(action):
                 if action and self.screen is origin:
+                    if action == 'quit':
+                        # Dismissing the menu can restore focus to the search input.
+                        # Its typing guard applies to q, not to this selected command.
+                        await self.action_quit()
+                        return
                     target = origin if hasattr(origin, 'actions_for_menu') and any(
                         row[0] == action for row in origin.actions_for_menu()) else self
                     await self.run_action(action, default_namespace=target)

@@ -199,7 +199,6 @@ def make_project_screens(model):
             Binding('r', 'refresh', '刷新', show=False),
             Binding('slash', 'search', '搜索'),
             Binding('question_mark', 'app.help', '帮助'),
-            Binding('ctrl+p', 'app.command_palette', '更多操作'),
             Binding('j', 'step(1)', '下一项', show=False),
             Binding('k', 'step(-1)', '上一项', show=False),
         ]
@@ -229,7 +228,7 @@ def make_project_screens(model):
             yield OptionList(id='nav-list')
             yield Static('正在读取项目…', id='nav-state', markup=False)
             yield Static('↑↓ 选择    Enter 打开', id='nav-hint', markup=False)
-            yield Footer()
+            yield Footer(compact=True)
 
         def on_mount(self):
             self.query_one('#nav-list').focus()

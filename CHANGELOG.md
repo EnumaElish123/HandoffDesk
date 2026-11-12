@@ -2,6 +2,7 @@
 
 ## Unreleased — Linux workflow improvements
 
+- Show plain-key menu (`.`) and quit (`q`) controls in the terminal reader, with a separate detach action for dedicated tmux sessions.
 - Open the Linux terminal reader on a project homepage with directory registration, task creation, recent reading position and scoped history.
 - Present next actions first, preview without acknowledging, and offer a searchable command menu, help and selectable clipboard text.
 - Coalesce search requests and use a thread-owned SQLite change monitor for the TUI; keep existing clients and database schemas compatible.
