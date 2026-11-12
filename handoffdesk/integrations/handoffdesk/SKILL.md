@@ -1,6 +1,6 @@
 ---
 name: handoffdesk
-description: Manage HandoffDesk projects from chat. Use to register a project, set or relocate its local path, read progress, or proactively record milestones, decisions and blockers during work on a connected project. 支持对话建项、设置项目目录、查询进展和主动记录。
+description: Manage HandoffDesk projects from chat. Use to register a project, set or relocate its local path, read progress, or proactively record milestones, decisions and blockers during work on a connected project. 支持对话建项、路径和工作线管理、主动记录、来源复核、历史恢复、材料查询、导出与接入诊断。
 ---
 
 # HandoffDesk
@@ -60,8 +60,9 @@ relevant to the requested task.
 
 For “这个项目做到哪里了”, use `feed --project <id>` and
 `read <record_id> --markdown`. Use `read --ack` only when asked to mark the
-record as read. For other HandoffDesk operations, use the installed command's
-`--help` and the selected subcommand's help to obtain its current arguments.
+record as read. For worklines, materials, source review, history, imports, exports, readers,
+setup or diagnostics, follow [the operations reference](references/operations.md).
+Use subcommand help for optional flags in the installed version.
 
 When entering a project without the prior session reference, run
 `agent sessions --cwd <absolute-project-directory>` to discover existing tasks.

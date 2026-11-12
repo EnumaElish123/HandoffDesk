@@ -230,6 +230,8 @@ def connect_codex(app_dir, *, codex_home=None, skills_home=None, hooks=True, reg
         desired_files = {skills / 'handoffdesk' / 'SKILL.md': content.encode('utf-8'),
                          skills / 'handoffdesk' / 'agents' / 'openai.yaml':
                          (template.parent / 'agents' / 'openai.yaml').read_bytes()}
+        operations = Path('references') / 'operations.md'
+        desired_files[skills / 'handoffdesk' / operations] = (template.parent / operations).read_bytes()
         previous_files = old.get('files', {})
         for path in desired_files:
             _safe_target(path)

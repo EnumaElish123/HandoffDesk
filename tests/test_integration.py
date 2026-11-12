@@ -38,6 +38,10 @@ class IntegrationTests(unittest.TestCase):
         hook_path.write_text(json.dumps(original), encoding='utf-8')
         (self.codex / 'AGENTS.md').write_text('my instructions', encoding='utf-8')
         first = self.connect()
+        operations = Path('handoffdesk/references/operations.md')
+        installed_reference = self.skills / operations
+        bundled_reference = Path(integration.__file__).parent / 'integrations' / operations
+        self.assertEqual(installed_reference.read_bytes(), bundled_reference.read_bytes())
         before = hook_path.read_bytes()
         second = self.connect()
         self.assertEqual(before, hook_path.read_bytes())
@@ -47,6 +51,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn(original_hook, json.loads(hook_path.read_text())['hooks']['Stop'])
         result = integration.disconnect_codex(self.app)
         self.assertTrue(result['disconnected'])
+        self.assertFalse(installed_reference.exists())
         self.assertEqual(json.loads(hook_path.read_text()), original)
         self.assertEqual((self.codex / 'AGENTS.md').read_text(), 'my instructions')
         self.assertTrue(self.registry.exists())
