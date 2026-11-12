@@ -1,5 +1,5 @@
 interface:
   display_name: "HandoffDesk"
-  short_description: "Record project progress and report each saved milestone"
+  short_description: "Manage project paths, read progress, and record milestones"
 policy:
   allow_implicit_invocation: true

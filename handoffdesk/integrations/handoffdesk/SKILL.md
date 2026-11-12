@@ -1,6 +1,6 @@
 ---
 name: handoffdesk
-description: Record local project milestones, decisions, blockers, and actionable plans in HandoffDesk during project work, then report each successful receipt to the user. Use when implementing, investigating, planning, or resuming a project with outcomes worth handing off.
+description: Manage HandoffDesk projects from chat. Use to register a project, set or relocate its local path, read progress, or proactively record milestones, decisions and blockers during work on a connected project. 支持对话建项、设置项目目录、查询进展和主动记录。
 ---
 
 # HandoffDesk
@@ -11,6 +11,57 @@ below already selects this machine's state directory:
 ```sh
 @HANDOFFDESK_COMMAND@
 ```
+
+Append the subcommands below to that command. Supply paths and names as individual
+arguments, including spaces and non-ASCII text. A user can give the project
+directory in chat; use that directory even when the chat opened elsewhere.
+Use the current directory when the user identifies it as the project. Ask for
+the missing directory or project identity only if the target is unclear.
+
+## Register a project or set its path
+
+- For “把 /path/to/project 接入 HandoffDesk，以后主动记录”, resolve the
+  existing local directory and run `agent inspect --cwd <directory>`.
+  Compare its returned project ID, root and match with the request. Reuse an
+  existing match, including a known Git worktree. If a separately requested
+  project falls inside another registered root, explain the overlap. Do not
+  silently use the parent or register a broader Git root.
+- To register the exact directory, use the requested display name or its
+  directory name. Choose an unused ID made of ASCII letters, digits, hyphens
+  or underscores unless the user supplied an ID. `list` shows registered IDs
+  and names. With an existing configuration run
+  `project add <id> --name <name> --root <directory>`. For a confirmed fresh
+  state use `init --project <id> --name <name> --root <directory>`. If a
+  registration races with another, inspect again and reuse the matching
+  binding. Report other failures. A missing directory requires the correct
+  path or a request to create it.
+- For “项目搬到了 /new/path”, identify the existing project by ID (resolve a
+  name with `list`) and run `agent relocate --project <id> --root <directory>`.
+  This changes the main root while retaining the project ID and history. It
+  does not move files. For a named root other than main, read
+  `configure-roots --show`, merge the requested registered project/root key
+  into that mapping, and pass the resulting UTF-8 JSON in a temporary file
+  outside the project to `configure-roots --file <file>`. Preserve all other
+  mappings. Example shape: `{"schema_version":1,"projects":{"alpha":{"docs":"/new/docs"}}}`.
+- Verify registration or relocation with `agent inspect --cwd <directory>`.
+  Confirm the expected ID and root, then report the display name, ID and
+  effective path. A request to register or map a path alone needs no invented
+  work session. Project registration and these rules live outside the project;
+  users do not need to copy instructions or add an AGENTS.md to each checkout.
+
+## Track work and read progress
+
+During work on a connected project, use this workflow without waiting for
+another reminder. Save when a stage produces a result, a decision is made,
+a blocker changes the next step, or work is handed off. Before finishing,
+save any outstanding outcome. Skip duplicate checkpoints and pure Q&A.
+Keep the state directory separate from project files and select only files
+relevant to the requested task.
+
+For “这个项目做到哪里了”, use `feed --project <id>` and
+`read <record_id> --markdown`. Use `read --ack` only when asked to mark the
+record as read. For other HandoffDesk operations, use the installed command's
+`--help` and the selected subcommand's help to obtain its current arguments.
 
 When entering a project without the prior session reference, run
 `agent sessions --cwd <absolute-project-directory>` to discover existing tasks.
