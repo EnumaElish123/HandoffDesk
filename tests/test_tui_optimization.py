@@ -42,6 +42,8 @@ class OptimizedTerminalTests(unittest.IsolatedAsyncioTestCase):
         app = create_app(self.state)
         async with app.run_test(size=(80,24)) as pilot:
             await pilot.pause()
+            app.open_feed()
+            await pilot.pause()
             row = str(app.query_one('#records',OptionList).get_option_at_index(0).prompt)
             self.assertIn('试用项目 / ', row)
             await pilot.press('enter','/')
@@ -65,6 +67,8 @@ class OptimizedTerminalTests(unittest.IsolatedAsyncioTestCase):
         self.save()
         app=create_app(self.state)
         async with app.run_test(size=(80,24)) as pilot:
+            await pilot.pause()
+            app.open_feed()
             await pilot.pause()
             await pilot.press('enter','f'); await pilot.pause()
             self.assertIn('可用',str(app.screen.query_one('#file-list',OptionList).get_option_at_index(0).prompt))
@@ -94,6 +98,8 @@ class OptimizedTerminalTests(unittest.IsolatedAsyncioTestCase):
         for i in range(55):self.save('长标题'*15+str(i))
         app=create_app(self.state)
         async with app.run_test(size=(80,24)) as pilot:
+            await pilot.pause()
+            app.open_feed()
             await pilot.pause();await pilot.press('n');await pilot.pause()
             listing=app.query_one('#records',OptionList)
             listing.highlighted=len(app.items)-1
@@ -117,6 +123,8 @@ class OptimizedTerminalTests(unittest.IsolatedAsyncioTestCase):
         destination=self.base/'交接 导出.md'
         app=create_app(self.state)
         async with app.run_test(size=(80,24)) as pilot:
+            await pilot.pause()
+            app.open_feed()
             await pilot.pause();await pilot.press('enter','e');await pilot.pause()
             self.assertFalse(destination.exists())
             app.screen.query_one('#export-path',Input).value=str(destination)
@@ -142,6 +150,8 @@ class OptimizedTerminalTests(unittest.IsolatedAsyncioTestCase):
         with patch('handoffdesk.integration.doctor',return_value=result):
             app=create_app(self.state)
             async with app.run_test(size=(80,24)) as pilot:
+                await pilot.pause()
+                app.open_feed()
                 await pilot.pause()
                 self.assertIn('尚未接入',str(app.query_one('#empty',Static).render()))
                 await pilot.press('c');await pilot.pause()

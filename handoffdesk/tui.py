@@ -26,13 +26,16 @@ def create_app(app_dir=None, data_dir=None):
     from textual.app import App, ComposeResult
     from textual.binding import Binding
     from textual.containers import Horizontal, Vertical
-    from textual.screen import ModalScreen
+    from textual.screen import ModalScreen, Screen
     from textual.widgets import Footer, Header, Input, Label, OptionList, Select, Static, TextArea
     from textual.widgets.option_list import Option
     from .reader import ReaderModel, safe_text, format_recorded_at
     from .paths import app_directory
 
+    from .tui_projects import make_project_screens, save_reading_position
+
     model = ReaderModel(app_dir, data_dir)
+    Home = make_project_screens(model)
     zone = os.environ.get('HANDOFFDESK_TIMEZONE') or None
 
     class AnchoredOptions(OptionList):
@@ -171,6 +174,7 @@ def create_app(app_dir=None, data_dir=None):
                 self.query_one('#connection-info', TextArea).load_text(safe_text(text))
 
     class HandoffApp(App):
+        MODES = {'_default': Screen, 'projects': Home}
         TITLE = 'HandoffDesk'
         SUB_TITLE = '本机进展 · Agent 记录，随时续接'
         CSS = '''
@@ -208,6 +212,8 @@ def create_app(app_dir=None, data_dir=None):
             self.project_signature, self.projects_data, self.task_signature = None, [], None
             self.pending_updates = False
             self.reader_screen = None
+            self.feed_visit = 0
+            self.feed_ready = False
 
         def widget(self, selector, kind=None):
             return self.reader_screen.query_one(selector, kind) if kind else self.reader_screen.query_one(selector)
@@ -229,13 +235,63 @@ def create_app(app_dir=None, data_dir=None):
             self.reader_screen = self.screen
             self.reader_screen.add_class('list-mode')
             self.resize_layout()
+            self.set_interval(1.5, self.poll)
+            self.switch_mode('projects')
+
+        def open_feed(self, project=None, line=None, record_id=None, *, search=False):
+            self.feed_ready = False
+            self.switch_mode('_default')
+            self.feed_visit += 1
+            self.list_request += 1
+            self.detail_request += 1
+            self.current = None
+            self.items = []
+            self.widget('#records', OptionList).clear_options()
+            self.feed_cursor = self.next_cursor = None
+            self.unread_only = self.pending_updates = False
+            self.reader_screen.remove_class('empty-mode', 'detail-mode')
+            self.reader_screen.add_class('list-mode')
+            self.status('正在读取进展…')
+            self.widget('#records').focus()
+            self.run_worker(self.prepare_feed(self.feed_visit, project, line, record_id, search),
+                            group='open-feed', exclusive=True)
+
+        async def prepare_feed(self, visit, project, line, record_id, search):
             try:
                 await self.load_projects()
+                if visit != self.feed_visit or self.screen is not self.reader_screen:
+                    return
+                with self.prevent(Select.Changed, Input.Changed):
+                    self.widget('#project', Select).value = project or ''
+                    self.load_tasks()
+                    self.widget('#task', Select).value = f'{project}:{line}' if line else ''
+                    self.widget('#search', Input).value = ''
+                self.feed_ready = True
+                self.filter_changed()
                 await self.load_records()
+                if visit != self.feed_visit or self.screen is not self.reader_screen:
+                    return
+                if record_id:
+                    await self.open_record(record_id)
+                elif search:
+                    self.action_search()
+                else:
+                    self.widget('#records').focus()
             except (ValueError, OSError, sqlite3.Error) as exc:
-                self.status('读取失败，可按 r 重试：' + str(exc))
-            self.set_interval(1.5, self.poll)
-            self.widget('#records').focus()
+                self.status('读取失败，可返回项目重选：' + safe_text(exc))
+
+        def check_action(self, action, parameters):
+            if self.reader_screen is None:
+                return super().check_action(action, parameters)
+            reader_actions = {'back', 'files', 'export', 'search', 'projects', 'tasks', 'refresh',
+                              'unread', 'clear_filters', 'continue_task', 'more', 'next_record', 'previous_record'}
+            if action in reader_actions and self.screen is not self.reader_screen:
+                return False
+            if action in {'files', 'export', 'continue_task'}:
+                return bool(self.current and (action != 'files' or self.current['files']))
+            if action == 'quit' and isinstance(self.focused, Input):
+                return False
+            return super().check_action(action, parameters)
 
         def resize_layout(self):
             if self.reader_screen:
@@ -298,8 +354,12 @@ def create_app(app_dir=None, data_dir=None):
 
         async def empty_message(self):
             project, line = self.scope()
-            if project or line or self.unread_only or self.widget('#search', Input).value.strip():
+            if self.unread_only or self.widget('#search', Input).value.strip():
                 return '没有符合条件的记录。\n\n可修改搜索文字，或按 Esc 后再按 x 清空筛选。按 c 查看接入状态。'
+            if project or line:
+                return ('已登记，还没有进展。请让 Agent 在此项目目录保存第一条进展。'
+                        + (f'使用 agent begin 时传入 --workline {line}。' if line else '')
+                        + '按 Esc 返回。')
             from .integration import doctor
             try:
                 result = await asyncio.to_thread(doctor, app_directory(app_dir), probe=False)
@@ -346,7 +406,10 @@ def create_app(app_dir=None, data_dir=None):
                         if self.is_running and request == self.list_request and listing.highlighted is not None:
                             listing.scroll_to(y=listing.row_line(listing.highlighted) - old_offset, animate=False, force=True)
                     self.call_after_refresh(restore_anchor)
+                was_empty = self.reader_screen.has_class('empty-mode')
                 self.reader_screen.set_class(not self.items and not self.current, 'empty-mode')
+                if was_empty and self.items and self.screen is self.reader_screen and not isinstance(self.focused, Input):
+                    listing.focus()
                 if not self.items:
                     message = await self.empty_message()
                     if request == self.list_request and self.is_running:
@@ -358,7 +421,7 @@ def create_app(app_dir=None, data_dir=None):
                 self.status('读取失败：' + str(exc))
 
         async def poll(self):
-            if self.polling or self.reader_screen is None:
+            if not self.feed_ready or self.polling or self.current_mode == 'projects' or self.reader_screen is None:
                 return
             self.polling = True
             try:
@@ -382,12 +445,12 @@ def create_app(app_dir=None, data_dir=None):
                 self.polling = False
 
         async def on_input_changed(self, event):
-            if event.input.id == 'search' and self.reader_screen and self.is_running:
+            if event.input.id == 'search' and self.feed_ready and self.screen is self.reader_screen and self.is_running:
                 self.filter_changed()
                 await self.load_records()
 
         async def on_select_changed(self, event):
-            if event.select.id in {'project', 'task'} and self.reader_screen and self.is_running:
+            if event.select.id in {'project', 'task'} and self.feed_ready and self.screen is self.reader_screen and self.is_running:
                 if event.select.id == 'project':
                     self.load_tasks()
                 self.filter_changed()
@@ -396,7 +459,9 @@ def create_app(app_dir=None, data_dir=None):
         async def on_option_list_option_selected(self, event):
             if event.option_list.id != 'records':
                 return
-            record_id = event.option.id
+            await self.open_record(event.option.id)
+
+        async def open_record(self, record_id):
             self.detail_request += 1
             request = self.detail_request
             try:
@@ -410,7 +475,15 @@ def create_app(app_dir=None, data_dir=None):
                 self.reader_screen.remove_class('list-mode')
                 self.reader_screen.add_class('detail-mode')
                 self.widget('#detail').focus()
-                await asyncio.to_thread(model.ack, [record_id])
+                self.refresh_bindings()
+                try:
+                    await asyncio.to_thread(model.ack, [record_id])
+                except (ValueError, OSError, sqlite3.Error) as exc:
+                    self.status('正文已打开，已读状态待同步：' + safe_text(exc))
+                try:
+                    await asyncio.to_thread(save_reading_position, model, value)
+                except (ValueError, OSError, sqlite3.Error) as exc:
+                    self.status('阅读位置未保存：' + safe_text(exc))
             except (ValueError, OSError, sqlite3.Error) as exc:
                 self.status('无法读取详情：' + str(exc))
 
@@ -452,9 +525,18 @@ def create_app(app_dir=None, data_dir=None):
             self.widget('#records').focus()
 
         def action_back(self):
-            self.reader_screen.remove_class('detail-mode')
-            self.reader_screen.add_class('list-mode')
-            self.widget('#records').focus()
+            if self.focused is self.widget('#search'):
+                self.widget('#records').focus()
+            elif self.current:
+                self.filter_changed()
+                self.widget('#records').focus()
+                self.refresh_bindings()
+            else:
+                self.feed_ready = False
+                self.feed_visit += 1
+                self.list_request += 1
+                self.detail_request += 1
+                self.switch_mode('projects')
 
         async def action_files(self):
             if self.current and self.current['files']:

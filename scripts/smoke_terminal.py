@@ -48,6 +48,10 @@ def run_terminal(command, timeout):
         return time.monotonic()
 
     try:
+        home = wait_for(b'TerminalFixture')
+        os.write(master, b'\r')
+        wait_for('项目全部进展'.encode())
+        os.write(master, b'\r')
         listed = wait_for(b'MilestoneProbe')
         os.write(master, b'\r')
         opened = wait_for(b'DetailProbe')
@@ -70,7 +74,8 @@ def run_terminal(command, timeout):
                     break
         if proc.wait(timeout=max(0.01, deadline - time.monotonic())) != 0:
             raise RuntimeError('Terminal exited with an error')
-        return {'list_s': round(listed - start, 3), 'detail_s': round(opened - start, 3)}
+        return {'home_s': round(home - start, 3), 'list_s': round(listed - start, 3),
+                'enter_to_detail_s': round(opened - listed, 3), 'detail_s': round(opened - start, 3)}
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -91,7 +96,7 @@ def main():
     exe = args.executable.resolve()
     with tempfile.TemporaryDirectory(dir=args.temp_parent) as temp:
         root = Path(temp)
-        project = root / 'project'
+        project = root / 'TerminalFixture'
         project.mkdir()
         state = ['--app-dir', str(root / 'state')]
 

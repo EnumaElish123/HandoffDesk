@@ -37,6 +37,8 @@ class TerminalInteractionTests(unittest.IsolatedAsyncioTestCase):
             app = create_app(base / 'state')
             async with app.run_test(size=(80, 24)) as pilot:
                 await pilot.pause()
+                app.open_feed()
+                await pilot.pause()
                 self.assertEqual(len(app.items), 1)
                 await pilot.press('enter')
                 await pilot.pause()
