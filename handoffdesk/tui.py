@@ -29,7 +29,7 @@ def create_app(app_dir=None, data_dir=None):
     from textual.binding import Binding
     from textual.containers import Horizontal, Vertical
     from textual.screen import ModalScreen, Screen
-    from textual.widgets import Footer, Input, Label, OptionList, Select, Static, TextArea
+    from textual.widgets import Button, Footer, Input, Label, OptionList, Select, Static, TextArea
     from textual.widgets.option_list import Option
     from .reader import ReaderModel, safe_text
     from .paths import app_directory
@@ -56,7 +56,7 @@ def create_app(app_dir=None, data_dir=None):
         CSS = '''
         FilesScreen { background: $surface; }
         #file-modal { width: 100%; height: 100%; }
-        #file-heading { height: 1; }
+        #file-heading { height: 1; color: $accent; text-style: bold; }
         #file-list { height: 1fr; }
         #file-notice { height: auto; max-height: 5; display: none; }
         #file-preview { height: 1fr; display: none; }
@@ -69,15 +69,32 @@ def create_app(app_dir=None, data_dir=None):
         def __init__(self, record):
             super().__init__()
             self.record, self.current_path, self.request = record, '', 0
+            self.heading = f"节点附件 · {len(record['files'])} 项 · {safe_text(record['title'])}"
+
+        def file_option(self, item):
+            info = [item['kind'], item['status']]
+            if item.get('current_metadata') is not None:
+                info.append(f"{item['current_metadata']['size']:,} B")
+            elif item.get('recorded_metadata') is not None:
+                info.append(f"记录时 {item['recorded_metadata']['size']:,} B")
+            prompt = Text(overflow='fold')
+            prompt.append(safe_text(item['name']), style='bold')
+            prompt.append('\n' + ' · '.join(info), style='dim')
+            prompt.append('\n用途：' + safe_text(item.get('purpose') or '未填写'))
+            prompt.append('\n路径：' + safe_text(item['path']))
+            return Option(prompt, id=item['id'])
 
         def compose(self) -> ComposeResult:
             with Vertical(id='file-modal'):
-                yield Label('本次文件 · Enter 阅读 · Esc 返回', id='file-heading')
-                yield OptionList(*(Option(Text(safe_text(f"{item['name']} · {item.get('status', '')}\n{item.get('purpose', '')}")), id=item['id'])
-                                   for item in self.record['files']), id='file-list')
+                yield Label(self.heading, id='file-heading', markup=False)
+                if self.record['files']:
+                    yield OptionList(*(self.file_option(item) for item in self.record['files']), id='file-list')
+                else:
+                    yield Static('此节点没有关联附件。', markup=False)
                 yield Static('', id='file-notice', markup=False)
                 yield TextArea('', read_only=True, id='file-preview', soft_wrap=True)
-                yield Static('Enter 阅读 · Esc 返回 · Ctrl+C 复制路径', id='file-help', markup=False)
+                yield Static('Enter 预览 · Ctrl+C 复制路径 · Esc 返回' if self.record['files'] else 'Esc 返回',
+                             id='file-help', markup=False)
             yield Footer(compact=True)
 
         async def on_option_list_option_selected(self, event):
@@ -86,6 +103,7 @@ def create_app(app_dir=None, data_dir=None):
             item = next(item for item in self.record['files'] if item['id'] == event.option.id)
             self.current_path = item['path']
             self.add_class('preview-mode')
+            self.refresh_bindings()
             self.query_one('#file-heading', Label).update(safe_text(item['name']))
             self.query_one('#file-notice', Static).update(safe_text(item['path']) + '\n用途：' + safe_text(item.get('purpose', '')))
             self.query_one('#file-help', Static).update('PgUp/PgDn 阅读 · m 位置 · Ctrl+C 复制 · Esc 文件列表')
@@ -108,14 +126,22 @@ def create_app(app_dir=None, data_dir=None):
             if self.has_class('preview-mode'):
                 self.request += 1
                 self.remove_class('preview-mode', 'show-metadata')
-                self.query_one('#file-heading', Label).update('本次文件 · Enter 阅读 · Esc 返回')
-                self.query_one('#file-help', Static).update('Enter 阅读 · Esc 返回 · Ctrl+C 复制路径')
+                self.refresh_bindings()
+                self.query_one('#file-heading', Label).update(self.heading)
+                self.query_one('#file-help', Static).update('Enter 预览 · Ctrl+C 复制路径 · Esc 返回')
                 self.query_one('#file-list').focus()
             else:
                 self.dismiss()
 
         def action_metadata(self):
             self.toggle_class('show-metadata')
+
+        def check_action(self, action, parameters):
+            if action == 'metadata':
+                return self.has_class('preview-mode')
+            if action == 'copy_path':
+                return bool(self.record['files'])
+            return super().check_action(action, parameters)
 
         def action_copy_path(self):
             if not self.has_class('preview-mode'):
@@ -192,7 +218,9 @@ def create_app(app_dir=None, data_dir=None):
         CSS = '''
         Screen { background: $background; }
         #filters { display: none; }
-        #breadcrumb { height: 1; padding: 0 1; text-style: bold; color: $accent; }
+        #reader-heading { height: 1; }
+        #node-attachments { width: auto; min-width: 0; margin-right: 1; }
+        #breadcrumb { width: 1fr; height: 1; padding: 0 1; text-style: bold; color: $accent; }
         #search { display: none; }
         .search-mode #search { display: block; }
         #project { width: 50%; }
@@ -210,14 +238,14 @@ def create_app(app_dir=None, data_dir=None):
         .narrow.list-mode #detail { display: none; }
         .narrow.detail-mode #records { display: none; }
         '''
-        BINDINGS = [Binding('full_stop', 'command_palette', '更多操作', key_display='.'),
+        BINDINGS = [Binding('full_stop', 'help', '更多操作', key_display='.'),
                     Binding('q', 'quit', '退出'), Binding('/', 'search', '搜索'),
                     Binding('p', 'projects', '项目', show=False), Binding('t', 'tasks', '任务', show=False),
-                    Binding('f', 'files', '文件'), Binding('r', 'refresh', '刷新', show=False),
+                    Binding('f', 'files', '附件'), Binding('r', 'refresh', '刷新', show=False),
                     Binding('u', 'unread', '未读', show=False), Binding('escape', 'back', '返回'),
                     Binding('n', 'more', '下一页', show=False), Binding('e', 'export', '导出'),
                     Binding('c', 'connection', '接入状态', show=False), Binding('m', 'metadata', '元数据', show=False),
-                    Binding('ctrl+p', 'command_palette', '更多操作', show=False, priority=True), Binding('y', 'continue_task', '续接', show=False),
+                    Binding('ctrl+p', 'command_palette', '查找操作', show=False, priority=True), Binding('y', 'continue_task', '续接', show=False),
                     Binding('j', 'next_record', show=False), Binding('k', 'previous_record', show=False),
                     Binding('?', 'help', '帮助'), Binding('x', 'clear_filters', '清空筛选', show=False)]
 
@@ -247,7 +275,9 @@ def create_app(app_dir=None, data_dir=None):
             return self.reader_screen.query_one(selector, kind) if kind else self.reader_screen.query_one(selector)
 
         def compose(self) -> ComposeResult:
-            yield Static('全部进展', markup=False, id='breadcrumb')
+            with Horizontal(id='reader-heading'):
+                yield Static('全部进展', markup=False, id='breadcrumb')
+                yield Button('查看附件 (f)', id='node-attachments', compact=True, disabled=True)
             with Horizontal(id='filters'):
                 yield Select([('所有项目', '')], value='', allow_blank=False, id='project')
                 yield Select([('所有任务', '')], value='', allow_blank=False, id='task')
@@ -286,6 +316,7 @@ def create_app(app_dir=None, data_dir=None):
             self.detail_request += 1
             self.current = None
             self.items = []
+            self.widget('#node-attachments', Button).disabled = True
             self.widget('#records', OptionList).clear_options()
             self.feed_cursor = self.next_cursor = None
             self.unread_only = self.pending_updates = False
@@ -344,8 +375,10 @@ def create_app(app_dir=None, data_dir=None):
                 return False
             if action in reader_actions and self.screen is not self.reader_screen:
                 return False
-            if action in {'files', 'export', 'continue_task', 'mark_unread', 'metadata'}:
-                return bool(self.current and (action != 'files' or self.current['files']))
+            if action == 'files':
+                return self.attachment_target() is not None
+            if action in {'export', 'continue_task', 'mark_unread', 'metadata'}:
+                return bool(self.current)
             if isinstance(self.screen, ModalScreen):
                 if action in {'help', 'connection', 'command_palette'}:
                     return False
@@ -413,6 +446,7 @@ def create_app(app_dir=None, data_dir=None):
             self.reader_screen.add_class('list-mode')
             self.widget('#detail', TextArea).load_text('选择筛选结果，按 Enter 阅读。')
             self.pending_updates = False
+            self.widget('#node-attachments', Button).disabled = self.attachment_target() is None
             self.refresh_bindings()
             self.update_heading()
 
@@ -491,6 +525,8 @@ def create_app(app_dir=None, data_dir=None):
                 else:
                     listing.set_options(Option(prompt, id=rid) for rid, prompt in zip(ids, prompts))
                 listing.highlighted = next((i for i, item in enumerate(self.items) if item['id'] == prior_id), 0) if self.items else None
+                self.widget('#node-attachments', Button).disabled = self.attachment_target() is None
+                self.refresh_bindings()
                 if preserve_depth and prior_id and old_scroll:
                     # Background polling is deferred when scrolled; explicit refresh preserves the anchor.
                     def restore_anchor():
@@ -596,6 +632,7 @@ def create_app(app_dir=None, data_dir=None):
                 if request != self.detail_request or not self.is_running:
                     return
                 self.current = value
+                self.widget('#node-attachments', Button).disabled = False
                 self.record_notice = None
                 self.widget('#detail', TextArea).load_text(text)
                 self.reader_screen.remove_class('list-mode')
@@ -751,17 +788,33 @@ def create_app(app_dir=None, data_dir=None):
                 self.detail_request += 1
                 self.switch_mode('projects')
 
+        def attachment_target(self):
+            if self.current:
+                return self.current
+            listing = self.widget('#records', OptionList)
+            index = listing.highlighted
+            return self.items[index] if index is not None and index < len(self.items) else None
+
+        async def on_button_pressed(self, event):
+            if event.button.id == 'node-attachments' and self.screen is self.reader_screen:
+                self.widget('#detail' if self.current else '#records').focus()
+                await self.action_files()
+
         async def action_files(self):
-            if self.current and self.current['files']:
-                record_id = self.current['id']
-                try:
-                    current = await asyncio.to_thread(model.detail, record_id)
-                    if self.is_running and self.screen is self.reader_screen and self.current and self.current['id'] == record_id:
-                        self.push_screen(FilesScreen(current))
-                except (ValueError, OSError, sqlite3.Error) as exc:
-                    self.status('读取文件失败：' + str(exc))
-            else:
-                self.status('先打开一条含附件的记录，再按 f。')
+            target = self.attachment_target()
+            if target is None:
+                return
+            record_id = target['id']
+            visit = self.feed_visit
+            try:
+                record = await asyncio.to_thread(model.detail, record_id)
+            except (ValueError, OSError, sqlite3.Error) as exc:
+                self.status('读取附件失败：' + str(exc))
+                return
+            if self.is_running and self.screen is self.reader_screen and visit == self.feed_visit:
+                selected = self.attachment_target()
+                if selected and selected['id'] == record_id:
+                    self.push_screen(FilesScreen(record))
 
         def action_export(self):
             if self.current:
@@ -820,8 +873,8 @@ def create_app(app_dir=None, data_dir=None):
                 if self.current:
                     actions += [('continue_task','复制续接说明','y','复制 下一步'),('export','导出当前记录','e','保存'),
                                 ('metadata','展开或收起元数据','m','编号 作者 时间'),('mark_unread','标为未读','','稍后阅读')]
-                    if self.current['files']:
-                        actions.insert(0, ('files','查看本次文件','f','附件'))
+                if self.attachment_target():
+                    actions.insert(0, ('files','查看节点附件','f','附件 文件 路径'))
                 project = self.scope()[0]
             else:
                 actions = list(self.screen.actions_for_menu()) if hasattr(self.screen,'actions_for_menu') else []
@@ -841,6 +894,12 @@ def create_app(app_dir=None, data_dir=None):
                 self.notify(safe_text(exc), severity='warning')
 
         def action_command_palette(self):
+            self.open_actions(search=True)
+
+        def action_help(self):
+            self.open_actions(search=False)
+
+        def open_actions(self, *, search):
             if isinstance(self.screen, ModalScreen):
                 return
             origin = self.screen
@@ -855,7 +914,12 @@ def create_app(app_dir=None, data_dir=None):
                     target = origin if hasattr(origin, 'actions_for_menu') and any(
                         row[0] == action for row in origin.actions_for_menu()) else self
                     await self.run_action(action, default_namespace=target)
-            self.push_screen(ActionMenu('更多操作', choices), selected)
+            if search:
+                screen = ActionMenu('查找操作', choices)
+            else:
+                context = self.scope_name() if origin is self.reader_screen else '项目导航'
+                screen = HelpScreen(context, choices)
+            self.push_screen(screen, selected)
 
         def action_next_record(self):
             listing = self.widget('#records', OptionList)
@@ -870,10 +934,6 @@ def create_app(app_dir=None, data_dir=None):
                 self.filter_changed()
             listing.focus()
             listing.action_cursor_up()
-
-        def action_help(self):
-            context = self.scope_name() if self.screen is self.reader_screen else '项目导航'
-            self.push_screen(HelpScreen(context, self.menu_choices()))
 
     return HandoffApp()
 

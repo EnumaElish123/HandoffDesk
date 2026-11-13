@@ -34,8 +34,23 @@ class ReadingDialogTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press('escape')
             self.assertIsNone(received[-1])
             await app.push_screen(HelpScreen('记录', choices))
-            self.assertIn('导出记录', app.screen.query_one(TextArea).text)
-            await pilot.press('pagedown', 'escape')
+            listing = app.screen.query_one(OptionList)
+            self.assertIn('导出记录', listing.get_option('export').prompt.plain)
+            await pilot.press('enter')
+            self.assertIn('Ctrl+P', app.screen.query_one(TextArea).text)
+            await pilot.press('escape', 'c')
+            self.assertEqual(listing.highlighted_option.prompt.plain.splitlines()[0], 'handoffdesk --help')
+            names = [item.prompt.plain.splitlines()[0] for item in listing.options
+                     if item.id and item.id.startswith('cli-')]
+            self.assertIn('handoffdesk agent checkpoint --help', names)
+            self.assertIn('handoffdesk worklines PROJECT bind --help', names)
+            self.assertFalse(any('integration-hook' in name for name in names))
+            await pilot.press('end', 'enter')
+            self.assertIn('--probe', app.screen.query_one(TextArea).text)
+            await pilot.press('escape')
+            self.assertIn('handoffdesk doctor --help', listing.highlighted_option.prompt.plain)
+            self.assertIs(app.focused, listing)
+            await pilot.press('escape')
             self.assertIsInstance(app.focused, Button)
 
             from handoffdesk.tui_reading import AdvancedScreen

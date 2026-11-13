@@ -17,10 +17,8 @@ def scoped_project(parser, json_flag=False):
         parser.add_argument('--json', action='store_true')
 
 
-def main(argv=None):
+def build_parser(*, machine=False):
     from . import agent_cli, agent_session_cli, integration_cli
-    actual_argv = list(sys.argv[1:] if argv is None else argv)
-    machine = '--json' in actual_argv or any(item in agent_cli.COMMANDS | integration_cli.COMMANDS | {'init', 'project', 'agent', 'feed', 'read'} for item in actual_argv)
 
     class Parser(argparse.ArgumentParser):
         def error(self, message):
@@ -29,7 +27,7 @@ def main(argv=None):
                 self.exit(2)
             super().error(message)
 
-    parser = Parser(description="HandoffDesk：只读来源，本地保存交接。")
+    parser = Parser(prog="handoffdesk", description="HandoffDesk：只读来源，本地保存交接。")
     parser.add_argument('--version', action='version', version=f'HandoffDesk {__version__}')
     parser.add_argument("--data-dir", type=Path, help="独立数据目录（禁止放入接入项目）")
     parser.add_argument("--app-dir", type=Path, help="状态目录，含 config/projects.json 与 data；优先于 HANDOFFDESK_HOME")
@@ -61,8 +59,9 @@ def main(argv=None):
     add.add_argument('--root', type=Path, required=True)
     listing = subs.add_parser("list", help="列出项目")
     listing.add_argument("--json", action="store_true")
-    for name in ("show", "refresh", "history"):
-        cmd = subs.add_parser(name)
+    for name, description in [('show', '查看项目与工作线现状'), ('refresh', '刷新项目来源并保存快照'),
+                              ('history', '查看工作线的交接历史')]:
+        cmd = subs.add_parser(name, help=description)
         scoped_project(cmd, json_flag=True)
     cmd = subs.add_parser("handoff", help="导入一份交接；默认标为助手建议")
     scoped_project(cmd)
@@ -80,7 +79,7 @@ def main(argv=None):
     scoped_project(cmd)
     cmd.add_argument("--revision", type=int, required=True)
     cmd.add_argument("--expect-revision", type=int, required=True)
-    cmd = subs.add_parser("export")
+    cmd = subs.add_parser("export", help="将工作线交接导出为 Markdown")
     scoped_project(cmd)
     cmd.add_argument("--format", choices=["markdown"], default="markdown")
     cmd.add_argument("--mode", choices=["local"], default="local")
@@ -93,16 +92,16 @@ def main(argv=None):
     cmd.add_argument('source_id')
     cmd.add_argument('--action', choices=['open', 'folder', 'copy'], default='open')
     cmd = subs.add_parser('worklines', help='查看、新建、选择工作线，或绑定 1–3 份材料')
-    cmd.add_argument('project')
+    cmd.add_argument('project', metavar='PROJECT')
     cmd.add_argument('--workline', help='bind 操作的目标工作线；省略时使用当前工作线')
     cmd.add_argument('--json', action='store_true')
     line_subs = cmd.add_subparsers(dest='workline_command')
-    line_subs.add_parser('list')
-    line_create = line_subs.add_parser('create')
+    line_subs.add_parser('list', help='列出项目的工作线')
+    line_create = line_subs.add_parser('create', help='创建工作线')
     line_create.add_argument('name')
-    line_select = line_subs.add_parser('select')
+    line_select = line_subs.add_parser('select', help='切换当前工作线')
     line_select.add_argument('workline_id')
-    line_bind = line_subs.add_parser('bind')
+    line_bind = line_subs.add_parser('bind', help='将材料绑定到工作线')
     line_bind.add_argument('entries', nargs='+', help='登记的材料入口编号（最多 3 项）')
     line_bind.add_argument('--workline', dest='bind_workline', help='绑定到指定工作线')
     cmd = subs.add_parser('review', help='明确复核当前来源变化，保留原交接依据')
@@ -111,13 +110,36 @@ def main(argv=None):
     cmd.add_argument('--snapshot', type=int, required=True, help='已经检查过的当前快照编号')
     cmd = subs.add_parser('reviews', help='查看当前工作线的复核历史')
     scoped_project(cmd, json_flag=True)
-    cmd = subs.add_parser("focus")
+    cmd = subs.add_parser("focus", help="查看或选择项目的焦点作业")
     cmd.add_argument("project")
     cmd.add_argument("--job-id", help="留空字符串恢复历史示例；省略参数则列出候选")
     agent_cli.add_parsers(subs)
     agent_session_cli.register(subs)
     integration_cli.register(subs)
-    args = parser.parse_args(actual_argv)
+    # argparse displays suppressed subcommands in the usage line and help rows
+    # unless the public metavar and help rows are supplied explicitly.
+    visible = [entry for entry in subs._get_subactions() if entry.help != argparse.SUPPRESS]
+    subs.metavar = '{' + ','.join(entry.dest for entry in visible) + '}'
+    subs._choices_actions[:] = visible
+    return parser
+
+
+def command_catalog(parser):
+    """Walk the public argparse command tree, including children with positional parents."""
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for entry in action._get_subactions():
+                if entry.help != argparse.SUPPRESS:
+                    child = action.choices[entry.dest]
+                    yield child, entry.help
+                    yield from command_catalog(child)
+
+
+def main(argv=None):
+    from . import agent_cli, agent_session_cli, integration_cli
+    actual_argv = list(sys.argv[1:] if argv is None else argv)
+    machine = '--json' in actual_argv or any(item in agent_cli.COMMANDS | integration_cli.COMMANDS | {'init', 'project', 'agent', 'feed', 'read'} for item in actual_argv)
+    args = build_parser(machine=machine).parse_args(actual_argv)
     import sqlite3
     from .store import ConflictError
     try:

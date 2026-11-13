@@ -2,6 +2,8 @@
 
 ## Unreleased — Linux workflow improvements
 
+- Open attachments from the highlighted or open record and read the full path, purpose, type, size, and availability directly in the list.
+- Browse current actions, keyboard shortcuts and the public CLI help tree directly from More actions (`.` or `?`). Keep action search on Ctrl+P.
 - Show plain-key menu (`.`) and quit (`q`) controls in the terminal reader, with a separate detach action for dedicated tmux sessions.
 - Open the Linux terminal reader on a project homepage with directory registration, task creation, recent reading position and scoped history.
 - Present next actions first, preview without acknowledging, and offer a searchable command menu, help and selectable clipboard text.

@@ -178,31 +178,109 @@ class ReadOnlyDialog(ReadingDialog):
     BINDINGS = [Binding('q', 'app.quit', '退出')]
 
 
-class HelpScreen(ReadOnlyDialog):
-    def __init__(self, context, choices):
+class ReferencePage(ReadOnlyDialog):
+    def __init__(self, title, body):
         super().__init__()
-        self.context = context
-        self.choices = list(choices)
+        self.heading, self.body = title, body
 
     def compose(self):
-        lines = ['当前位置可用的操作', '.    更多操作（也可用 Ctrl+P）']
-        for _, label, key, _ in self.choices:
-            lines.append(f"{key or '更多操作'}    {label}")
-        lines.extend(['', '移动与选择', '↑ / ↓    选择一项', 'Enter    打开选中项',
-                      'Tab / Shift+Tab    移动焦点', 'Esc    返回上一层',
-                      '', '阅读帮助', '↑ / ↓ 或 PgUp / PgDn    滚动帮助',
-                      'Esc    回到打开帮助时的位置'])
         with Vertical():
-            yield Static('操作帮助 · ' + safe_text(self.context), classes='dialog-title', markup=False)
-            yield TextArea(safe_text('\n'.join(lines)), read_only=True, soft_wrap=True, id='help-body')
-            yield Button('返回 (Esc)', id='help-close')
+            yield Static(self.heading, classes='dialog-title', markup=False)
+            yield TextArea(self.body, read_only=True, soft_wrap=True, id='help-body')
+            yield Static('↑↓ / PgUp / PgDn 滚动 · Esc 返回', classes='dialog-hint')
         yield Footer(compact=True, show_command_palette=False)
 
     def on_mount(self):
-        self.query_one('#help-body', TextArea).focus()
+        self.query_one(TextArea).focus()
 
-    def on_button_pressed(self, event):
-        self.dismiss()
+
+TUI_SHORTCUTS = """项目和任务
+↑↓ / j k    选择项目、任务或列表入口
+Enter       进入项目或任务，或打开选中入口
+a / +       添加项目或新建任务
+r           刷新项目和任务
+/           搜索当前范围的记录
+
+记录列表和正文
+↑↓ / j k    在列表选择记录，宽屏同步显示预览
+Enter       从列表打开正文并标记已读
+f           查看选中节点的附件、用途和路径
+p / t       切换项目 / 任务
+u / x       筛选未读 / 清空筛选
+/           搜索记录（Esc 返回）
+r / n       刷新记录 / 加载下一页
+m           展开或收起正文元数据
+y / e       复制续接说明 / 导出当前记录
+更多操作    将打开的记录标为未读，或查看项目高级命令示例
+
+附件
+↑↓ / Enter  选择文件 / 阅读预览
+Ctrl+C      复制当前文件的路径
+PgUp/PgDn   翻阅文件预览
+m           在预览中显示或收起位置和用途
+Esc         返回文件列表或记录
+
+浏览、帮助与表单
+. / ?       更多操作、全部快捷键和 CLI 命令
+Ctrl+P      按名称查找当前可执行操作
+c           查看接入状态；在诊断页按 r 重新检查
+Tab / Shift+Tab  切换焦点
+Enter       打开选中项或提交表单
+Esc         关闭弹窗、退出搜索或返回上一层
+q           退出阅读器
+专用 tmux 阅读器可从更多操作选择“离开并保持运行”。"""
+
+
+class HelpScreen(ReadOnlyDialog):
+    BINDINGS = [Binding('c', 'jump_cli', 'CLI 命令', show=False)]
+
+    def __init__(self, context, choices):
+        super().__init__()
+        from .cli import build_parser, command_catalog
+        self.context = context
+        self.choices = list(choices)
+        root = build_parser()
+        self.commands = [(root, '查看全局选项与顶层命令'), *command_catalog(root)]
+
+    def compose(self):
+        with Vertical():
+            yield Static('更多操作 · ' + safe_text(self.context), classes='dialog-title', markup=False)
+            yield Static('↑↓ 选择 · Enter 打开或执行 · Esc 返回', classes='dialog-hint')
+            options = [Option('全部界面快捷键', id='shortcuts'),
+                       Option('CLI 命令目录 · handoffdesk --help   (c)', id='jump-cli'),
+                       Option(Text('当前位置可执行的操作', style='bold'), disabled=True)]
+            for action, label, key, _ in self.choices:
+                if action != 'help':
+                    prompt = Text(safe_text(label))
+                    if key:
+                        prompt.append('   ' + safe_text(key), style='dim')
+                    options.append(Option(prompt, id=action))
+            options.append(Option(Text('CLI 命令和用法', style='bold'), disabled=True))
+            for index, (parser, description) in enumerate(self.commands):
+                prompt = Text(parser.prog + ' --help', style='bold')
+                prompt.append('\n' + description, style='dim')
+                options.append(Option(prompt, id=f'cli-{index}'))
+            yield OptionList(*options, id='help-choices')
+        yield Footer(compact=True, show_command_palette=False)
+
+    def on_mount(self):
+        self.query_one(OptionList).focus()
+
+    def action_jump_cli(self):
+        listing = self.query_one(OptionList)
+        listing.highlighted = listing.get_option_index('cli-0')
+
+    def on_option_list_option_selected(self, event):
+        action = event.option.id
+        if action == 'jump-cli':
+            self.action_jump_cli()
+        elif action == 'shortcuts':
+            self.app.push_screen(ReferencePage('全部界面快捷键', TUI_SHORTCUTS))
+        elif action.startswith('cli-'):
+            parser, description = self.commands[int(action[4:])]
+            self.app.push_screen(ReferencePage(parser.prog + ' --help', description + '\n\n' + parser.format_help()))
+        else:
+            self.dismiss(action)
 
 
 class AdvancedScreen(ReadOnlyDialog):

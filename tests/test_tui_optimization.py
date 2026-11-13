@@ -27,13 +27,49 @@ class OptimizedTerminalTests(unittest.IsolatedAsyncioTestCase):
         self.second.write_text('只读日志', encoding='utf-8')
         self.revision = 0
 
-    def save(self, title='完成核对'):
+    def save(self, title='完成核对', *, files=None):
         self.revision += 1
         return self.api.save({'schema_version':1,'project':'trial','workline':'default',
             'expected_revision':self.revision-1,'operation_id':f'terminal-{self.revision}',
             'record':{'title':title,'last_done':'已检查日志','next_action':'复查配置'},
             'actor':{'name':'Agent'},'verification':{'status':'partial','summary':'本地核对'},
-            'files':[{'path':str(self.note),'purpose':'排查结果'}, {'path':str(self.second),'purpose':'原始日志'}]})
+            'files': files if files is not None else [
+                {'path':str(self.note),'purpose':'排查结果'}, {'path':str(self.second),'purpose':'原始日志'}]})
+
+    async def test_open_highlighted_node_attachments_from_list(self):
+        from handoffdesk.reader import ReaderModel
+        from handoffdesk.tui import create_app
+        from textual.widgets import Button, Label, OptionList, Static
+
+        self.save('两个附件')
+        self.save('空清单', files=[])
+        reader = ReaderModel(self.state)
+        app = create_app(self.state)
+        async with app.run_test(size=(60, 18)) as pilot:
+            app.open_feed()
+            await pilot.pause()
+            button = app.query_one('#node-attachments', Button)
+            self.assertFalse(button.disabled)
+            self.assertTrue(await pilot.click('#node-attachments'))
+            self.assertIn('0 项 · 空清单', str(app.screen.query_one('#file-heading', Label).render()))
+            self.assertTrue(any('没有关联附件' in str(w.render()) for w in app.screen.query(Static)))
+            await pilot.press('ctrl+c', 'escape')
+
+            listing = app.query_one('#records', OptionList)
+            self.assertIs(app.focused, listing)
+            await pilot.press('down', 'f')
+            self.assertIn('2 项 · 两个附件', str(app.screen.query_one('#file-heading', Label).render()))
+            options = app.screen.query_one('#file-list', OptionList)
+            first = options.get_option_at_index(0).prompt.plain
+            for value in (self.note.name, '可用', '文件', f'{self.note.stat().st_size:,} B',
+                          '用途：排查结果', '路径：' + str(self.note)):
+                self.assertIn(value, first)
+            await pilot.press('down', 'ctrl+c')
+            self.assertEqual(app.clipboard, str(self.second))
+            await pilot.press('escape', 'escape')
+            self.assertEqual(listing.highlighted, 1)
+            self.assertIsNone(app.current)
+            self.assertFalse(reader.detail(app.items[1]['id'])['read'])
 
     async def test_search_from_detail_and_task_scope(self):
         from handoffdesk.tui import create_app
@@ -87,9 +123,12 @@ class OptimizedTerminalTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app.clipboard,str(self.second))
             await pilot.press('escape');await pilot.pause()
             await pilot.press('escape');await pilot.pause()
+            original_size = self.note.stat().st_size
             self.note.unlink()
             await pilot.press('f');await pilot.pause()
-            self.assertIn('缺失',str(app.screen.query_one('#file-list',OptionList).get_option_at_index(0).prompt))
+            missing = app.screen.query_one('#file-list', OptionList).get_option_at_index(0).prompt.plain
+            for value in ('缺失', str(self.note), f'记录时 {original_size:,} B'):
+                self.assertIn(value, missing)
             await pilot.press('enter');await pilot.pause()
             self.assertIn('请让 Agent',app.screen.query_one('#file-preview',TextArea).text)
 

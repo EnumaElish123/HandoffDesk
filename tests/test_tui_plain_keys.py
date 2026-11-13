@@ -37,7 +37,7 @@ class PlainKeyTests(unittest.IsolatedAsyncioTestCase):
         return button
 
     async def test_plain_keys_visible_on_browsing_screens_and_clickable(self):
-        from handoffdesk.tui_reading import ActionMenu
+        from handoffdesk.tui_reading import HelpScreen
         from textual.widgets import Input, OptionList
 
         async with self.app.run_test(size=(60, 18)) as pilot:
@@ -53,11 +53,12 @@ class PlainKeyTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(await pilot.click(menu_key))
                 else:
                     await pilot.press('.')
-                self.assertIsInstance(self.app.screen, ActionMenu)
+                self.assertIsInstance(self.app.screen, HelpScreen)
                 choices = self.app.screen.query_one(OptionList)
                 self.assertIn('quit', [row.id for row in choices.options])
-                await pilot.press('.', 'q')
-                self.assertEqual(self.app.screen.query_one(Input).value, '.q')
+                self.assertIs(self.app.focused, choices)
+                self.assertFalse(self.app.screen.query(Input))
+                self.assertIn('handoffdesk doctor --help', choices.options[-1].prompt.plain)
                 await pilot.press('escape')
                 self.assertIs(self.app.screen, origin)
             self.assertIsNotNone(self.app.current)
@@ -96,21 +97,21 @@ class PlainKeyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_read_only_help_can_exit_and_ctrl_p_still_opens_menu(self):
         from handoffdesk.tui_reading import ActionMenu, HelpScreen
-        from textual.widgets import TextArea
+        from textual.widgets import OptionList
 
         async with self.app.run_test(size=(60, 18)) as pilot:
             await pilot.press('ctrl+p')
             self.assertIsInstance(self.app.screen, ActionMenu)
             await pilot.press('escape', '?')
             self.assertIsInstance(self.app.screen, HelpScreen)
-            self.assertIn('更多操作', self.app.screen.query_one(TextArea).text)
+            self.assertEqual(self.app.screen.query_one(OptionList).highlighted_option.id, 'shortcuts')
             self.footer_key('q')
             with patch.object(self.app, 'exit', wraps=self.app.exit) as exit_app:
                 await pilot.press('q')
                 exit_app.assert_called_once()
 
     async def test_detach_choice_only_on_managed_reader_and_error_keeps_it_running(self):
-        from textual.widgets import Input, OptionList
+        from textual.widgets import OptionList
 
         async with self.app.run_test() as pilot:
             with patch('handoffdesk.terminal_session.is_managed_reader', return_value=False):
@@ -121,8 +122,8 @@ class PlainKeyTests(unittest.IsolatedAsyncioTestCase):
             with patch('handoffdesk.terminal_session.is_managed_reader', return_value=True):
                 origin = self.app.screen
                 await pilot.press('.')
-                self.app.screen.query_one(Input).value = '离开'
-                await pilot.pause()
+                choices = self.app.screen.query_one(OptionList)
+                choices.highlighted = choices.get_option_index('detach')
                 with patch('handoffdesk.terminal_session.detach_reader', side_effect=ValueError('连接已改变')) as detach, \
                         patch.object(self.app, 'notify') as notify:
                     await pilot.press('enter')
